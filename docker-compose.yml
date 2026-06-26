@@ -1,0 +1,34 @@
+services:
+  app:
+    build: .
+    command: sh -c "alembic upgrade head && uvicorn jedi_mind_agent.main:app --host 0.0.0.0 --port 8000 --reload"
+    environment:
+      APP_NAME: JediMindAgent
+      APP_ENV: local
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/jedi_mind_agent
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: jedi_mind_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d jedi_mind_agent" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
