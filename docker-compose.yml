@@ -2,9 +2,9 @@ services:
   app:
     build: .
     command: sh -c "alembic upgrade head && uvicorn jedi_mind_agent.main:app --host 0.0.0.0 --port 8000 --reload"
+    env_file:
+      - .env
     environment:
-      APP_NAME: JediMindAgent
-      APP_ENV: local
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/jedi_mind_agent
     ports:
       - "8000:8000"
