@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from jedi_mind_agent.api.v1.ai import router as ai_router
 from jedi_mind_agent.core.config import get_settings
 from jedi_mind_agent.db.health import check_database
 from jedi_mind_agent.db.session import dispose_engine
@@ -16,6 +17,7 @@ async def lifespan(_: FastAPI):
 settings = get_settings()
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.include_router(ai_router)
 
 
 @app.get("/health")
