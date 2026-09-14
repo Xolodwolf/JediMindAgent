@@ -1,7 +1,7 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from jedi_mind_agent.ai.prompts import SYSTEM_PROMPT
+from jedi_mind_agent.ai.prompts import SYSTEM_PROMPT, build_rag_prompt
 from jedi_mind_agent.core.config import Settings
 
 
@@ -19,14 +19,16 @@ class OpenAIChatService:
             else None
         )
 
-    async def respond(self, message: str) -> tuple[str, bool]:
+    async def respond(self, message: str, *, rag_context: str | None = None) -> tuple[str, bool]:
         if self._chat is None:
             return self._fallback_answer("OPENAI_API_KEY is not configured."), True
+
+        system_prompt = build_rag_prompt(rag_context) if rag_context else SYSTEM_PROMPT
 
         try:
             response = await self._chat.ainvoke(
                 [
-                    SystemMessage(content=SYSTEM_PROMPT),
+                    SystemMessage(content=system_prompt),
                     HumanMessage(content=message),
                 ]
             )
