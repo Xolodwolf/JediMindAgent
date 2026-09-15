@@ -10,9 +10,20 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+      - model_cache:/root/.cache
     depends_on:
       db:
         condition: service_healthy
+      chroma:
+        condition: service_started
+
+  chroma:
+    image: chromadb/chroma:1.0.15
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/chroma
+    volumes:
+      - chroma_data:/chroma/chroma
 
   db:
     image: postgres:16-alpine
@@ -31,4 +42,6 @@ services:
       retries: 10
 
 volumes:
+  chroma_data:
+  model_cache:
   postgres_data:
