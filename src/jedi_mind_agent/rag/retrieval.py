@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 from jedi_mind_agent.rag.config import RAG_TOP_K
 from jedi_mind_agent.rag.chroma import ChromaRagStore
 from jedi_mind_agent.rag.embeddings import LocalEmbeddingService
@@ -22,3 +24,16 @@ class RagRetrievalService:
             top_k=top_k or RAG_TOP_K,
             source_slug=source_slug,
         )
+
+
+@lru_cache(maxsize=1)
+def get_retrieval_service() -> RagRetrievalService:
+    return RagRetrievalService()
+
+
+def format_rag_context(results: list[RetrievalResult]) -> str:
+    blocks = []
+    for index, result in enumerate(results, start=1):
+        source = f"{result.source_title or result.source_filename}, pages {result.page_start}-{result.page_end}"
+        blocks.append(f"[{index}] Source: {source}\n{result.text}")
+    return "\n\n".join(blocks)

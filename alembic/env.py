@@ -5,14 +5,16 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+import jedi_mind_agent.product.models  # noqa: F401 - registers tables on Base.metadata
 from jedi_mind_agent.core.config import get_settings
+from jedi_mind_agent.db.base import Base
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def do_run_migrations(connection):
