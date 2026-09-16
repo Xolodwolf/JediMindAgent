@@ -14,6 +14,7 @@ from jedi_mind_agent.ai.service import fallback_answer
 from jedi_mind_agent.product.enums import (
     ACTIVE_EXERCISE_STATUSES,
     EXERCISE_TRANSITIONS,
+    LEVEL_RANK,
     NEXT_LEVEL,
     ChatRole,
     ExerciseStatus,
@@ -237,23 +238,23 @@ async def run_readiness_check(session: AsyncSession, *, user_id: uuid.UUID, agen
 
 def build_user_context(state: UserState, exercises: Sequence[UserExercise]) -> str:
     def show(value: object) -> str:
-        return "unknown" if value is None else str(value)
+        return "неизвестно" if value is None else str(value)
 
     lines = [
-        f"- level: {state.level}",
-        f"- mental fuel (1-10): {show(state.energy_level)}",
-        f"- focus (1-10): {show(state.focus_level)}",
-        f"- main problem: {show(state.main_problem)}",
-        f"- time for practice, minutes: {show(state.time_limit_minutes)}",
+        f"- уровень: {state.level}",
+        f"- мыслетопливо (1–10): {show(state.energy_level)}",
+        f"- фокус (1–10): {show(state.focus_level)}",
+        f"- главная проблема: {show(state.main_problem)}",
+        f"- время на практики, минут в день: {show(state.time_limit_minutes)}",
     ]
 
     active = [e for e in exercises if e.status in ACTIVE_EXERCISE_STATUSES]
     closed = [e for e in exercises if e.status not in ACTIVE_EXERCISE_STATUSES][:10]
-    lines.append("Active exercises:" if active else "Active exercises: none")
-    lines.extend(f"- {e.title} [{e.status}]" for e in active)
+    lines.append("Активные упражнения:" if active else "Активные упражнения: нет")
+    lines.extend(f"- {e.title} [{e.status}, {e.level}]" for e in active)
     if closed:
-        lines.append("Recently closed exercises:")
-        lines.extend(f"- {e.title} [{e.status}]" for e in closed)
+        lines.append("Недавно закрытые упражнения:")
+        lines.extend(f"- {e.title} [{e.status}, {e.level}]" for e in closed)
     return "\n".join(lines)
 
 
@@ -304,6 +305,13 @@ def _apply_exercise_proposal(
     if proposal is None or state.level == UserLevel.UNKNOWN:
         return
 
+    # Guardrail from the book: the user's level is the ceiling of practices.
+    # An unspecified or unknown practice level defaults to the user's level.
+    level = proposal.level if proposal.level not in (None, UserLevel.UNKNOWN) else state.level
+    if LEVEL_RANK[level] > LEVEL_RANK[state.level]:
+        logger.info("Exercise proposal rejected: practice level %s is above user level %s", level, state.level)
+        return
+
     title = _text(proposal.title)
     description = _text(proposal.description)
     if not title or not description:
@@ -320,7 +328,7 @@ def _apply_exercise_proposal(
     session.add(
         UserExercise(
             user_id=user_id,
-            level=state.level,
+            level=level,
             title=title[:200],
             description=description,
             estimated_minutes=minutes if minutes and 0 < minutes <= 600 else None,

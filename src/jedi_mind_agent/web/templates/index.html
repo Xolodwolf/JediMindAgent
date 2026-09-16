@@ -144,6 +144,7 @@
         </details>
         <div class="ex-meta">
           <span class="badge badge-{{ e.status.value }}">{{ status_labels[e.status] }}</span>
+          <span>ур. {{ level_rank[e.level] }}</span>
           {% if e.estimated_minutes %}<span>≈ {{ e.estimated_minutes }} мин</span>{% endif %}
         </div>
         <div class="ex-actions">
