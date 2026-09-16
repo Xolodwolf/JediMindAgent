@@ -50,6 +50,16 @@ LEVEL_RANK: dict[UserLevel, int] = {
     UserLevel.LEVEL_5: 5,
 }
 
+# Approved level names, see docs/levels.md.
+LEVEL_TITLES: dict[UserLevel, str] = {
+    UserLevel.UNKNOWN: "не определён",
+    UserLevel.LEVEL_1: "Все горит",
+    UserLevel.LEVEL_2: "Ночь простоять да день продержаться",
+    UserLevel.LEVEL_3: "Есть свет в конце тоннеля",
+    UserLevel.LEVEL_4: "Планомерно к намеченным целям",
+    UserLevel.LEVEL_5: "Естественно, спонтанно и все во благо",
+}
+
 NEXT_LEVEL: dict[UserLevel, UserLevel] = {
     UserLevel.LEVEL_1: UserLevel.LEVEL_2,
     UserLevel.LEVEL_2: UserLevel.LEVEL_3,

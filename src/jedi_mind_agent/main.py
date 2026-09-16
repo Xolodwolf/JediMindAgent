@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from jedi_mind_agent.api.v1.ai import router as ai_router
+from jedi_mind_agent.api.v1.product import router as product_router
 from jedi_mind_agent.api.v1.rag import router as rag_router
 from jedi_mind_agent.core.config import get_settings
 from jedi_mind_agent.db.health import check_database
@@ -27,6 +28,7 @@ settings = get_settings()
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(ai_router)
 app.include_router(rag_router)
+app.include_router(product_router)
 app.include_router(web_router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

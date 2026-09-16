@@ -3,6 +3,7 @@
 import logging
 import uuid
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import delete, select, update
@@ -51,6 +52,25 @@ class DomainError(Exception):
     pass
 
 
+class NotFoundError(DomainError):
+    pass
+
+
+@dataclass
+class ChatTurn:
+    user_message: ChatMessage
+    assistant_message: ChatMessage
+    state: UserState
+    new_exercises: list[UserExercise] = field(default_factory=list)
+
+
+@dataclass
+class ReadinessOutcome:
+    message: ChatMessage
+    state: UserState
+    check: ReadinessCheck | None = None
+
+
 # --- queries -----------------------------------------------------------------
 
 
@@ -78,6 +98,11 @@ async def list_messages(session: AsyncSession, chat_session_id: uuid.UUID, limit
     if limit is not None:
         stmt = stmt.limit(limit)
     return list(reversed((await session.scalars(stmt)).all()))
+
+
+async def list_user_messages(session: AsyncSession, user_id: uuid.UUID) -> list[ChatMessage]:
+    chat = await find_chat_session(session, user_id)
+    return await list_messages(session, chat.id) if chat else []
 
 
 async def list_exercises(session: AsyncSession, user_id: uuid.UUID) -> list[UserExercise]:
@@ -113,7 +138,7 @@ async def get_or_create_user(session: AsyncSession, username: str) -> User:
     return user
 
 
-async def reset_user(session: AsyncSession, user_id: uuid.UUID) -> None:
+async def reset_user(session: AsyncSession, user_id: uuid.UUID) -> UserState:
     """Delete all of the user's product data in one transaction. The user and an empty state remain."""
     for model in USER_DATA_MODELS:
         await session.execute(delete(model).where(model.user_id == user_id))
@@ -130,8 +155,10 @@ async def reset_user(session: AsyncSession, user_id: uuid.UUID) -> None:
             diagnostic_completed_at=None,
             updated_at=utcnow(),
         )
+        .execution_options(synchronize_session="fetch")
     )
     await session.commit()
+    return await get_state(session, user_id)
 
 
 async def change_exercise_status(
@@ -139,7 +166,7 @@ async def change_exercise_status(
 ) -> UserExercise:
     exercise = await session.get(UserExercise, exercise_id)
     if exercise is None or exercise.user_id != user_id:
-        raise DomainError("Упражнение не найдено.")
+        raise NotFoundError("Упражнение не найдено.")
     if target not in EXERCISE_TRANSITIONS.get(exercise.status, ()):
         raise DomainError(f"Недопустимый переход статуса: {exercise.status} → {target}.")
 
@@ -159,9 +186,10 @@ async def handle_chat_message(
     text: str,
     agent: JediAgent,
     retrieve: Retriever | None,
-) -> None:
+) -> ChatTurn:
     chat = await _get_or_create_chat_session(session, user_id)
-    session.add(ChatMessage(session_id=chat.id, user_id=user_id, role=ChatRole.USER, content=text))
+    user_message = ChatMessage(session_id=chat.id, user_id=user_id, role=ChatRole.USER, content=text)
+    session.add(user_message)
     chat.updated_at = utcnow()
     # Commit before the LLM call: the user's message survives an agent failure.
     await session.commit()
@@ -177,36 +205,42 @@ async def handle_chat_message(
         rag_context=format_rag_context(rag_results) if rag_results else None,
     )
 
+    new_exercises: list[UserExercise] = []
     if not used_fallback:
         _apply_diagnostic(session, user_id, state, reply.diagnostic)
-        _apply_exercise_proposal(session, user_id, state, exercises, reply.exercise, rag_results)
+        exercise = _apply_exercise_proposal(session, user_id, state, exercises, reply.exercise, rag_results)
+        if exercise is not None:
+            new_exercises.append(exercise)
 
-    await _post_assistant_message(
+    assistant_message = await _post_assistant_message(
         session,
         chat,
-        reply.answer,
+        _unescape_newlines(reply.answer),
         used_fallback=used_fallback,
         sources=[_source_ref(result) for result in rag_results],
     )
+    return ChatTurn(user_message, assistant_message, state, new_exercises)
 
 
-async def run_readiness_check(session: AsyncSession, *, user_id: uuid.UUID, agent: JediAgent) -> None:
+async def run_readiness_check(session: AsyncSession, *, user_id: uuid.UUID, agent: JediAgent) -> ReadinessOutcome:
     state = await get_state(session, user_id)
     chat = await _get_or_create_chat_session(session, user_id)
     from_level = state.level
 
     if from_level == UserLevel.UNKNOWN:
-        await _post_assistant_message(
+        message = await _post_assistant_message(
             session,
             chat,
             "Уровень пока не определён. Расскажите в чате о своём состоянии — после диагностики можно проверить готовность.",
         )
-        return
+        return ReadinessOutcome(message, state)
 
     target_level = NEXT_LEVEL.get(from_level)
     if target_level is None:
-        await _post_assistant_message(session, chat, "Вы уже на последнем уровне. Продолжайте закреплять практики.")
-        return
+        message = await _post_assistant_message(
+            session, chat, "Вы уже на последнем уровне. Продолжайте закреплять практики."
+        )
+        return ReadinessOutcome(message, state)
 
     exercises = await list_exercises(session, user_id)
     completed = [e for e in exercises if e.status == ExerciseStatus.COMPLETED and e.level == from_level]
@@ -224,10 +258,10 @@ async def run_readiness_check(session: AsyncSession, *, user_id: uuid.UUID, agen
             user_context=build_user_context(state, exercises), history=_to_history(history)
         )
         if assessment is None:
-            await _post_assistant_message(
+            message = await _post_assistant_message(
                 session, chat, fallback_answer("readiness assessment is unavailable."), used_fallback=True
             )
-            return
+            return ReadinessOutcome(message, state)
         result, summary = assessment.result, assessment.summary
 
     if result == ReadinessResult.READY:
@@ -242,12 +276,12 @@ async def run_readiness_check(session: AsyncSession, *, user_id: uuid.UUID, agen
             )
         )
 
-    session.add(
-        ReadinessCheck(
-            user_id=user_id, from_level=from_level, target_level=target_level, result=result, summary=summary
-        )
+    check = ReadinessCheck(
+        user_id=user_id, from_level=from_level, target_level=target_level, result=result, summary=summary
     )
-    await _post_assistant_message(session, chat, summary)
+    session.add(check)
+    message = await _post_assistant_message(session, chat, summary)
+    return ReadinessOutcome(message, state, check)
 
 
 # --- helpers -----------------------------------------------------------------
@@ -288,14 +322,14 @@ def _apply_diagnostic(
         state.diagnostic_completed_at = utcnow()
         changed = True
 
-    for field, value in (
+    for field_name, value in (
         ("energy_level", _scale(update.energy_level)),
         ("focus_level", _scale(update.focus_level)),
         ("main_problem", _text(update.main_problem)),
         ("time_limit_minutes", update.time_limit_minutes if update.time_limit_minutes and 0 < update.time_limit_minutes <= 600 else None),
     ):
-        if value is not None and getattr(state, field) != value:
-            setattr(state, field, value)
+        if value is not None and getattr(state, field_name) != value:
+            setattr(state, field_name, value)
             changed = True
 
     if changed:
@@ -318,41 +352,41 @@ def _apply_exercise_proposal(
     exercises: Sequence[UserExercise],
     proposal: ExerciseProposal | None,
     rag_results: Sequence[RetrievalResult],
-) -> None:
+) -> UserExercise | None:
     if proposal is None or state.level == UserLevel.UNKNOWN:
-        return
+        return None
 
     # Guardrail from the book: the user's level is the ceiling of practices.
     # An unspecified or unknown practice level defaults to the user's level.
     level = proposal.level if proposal.level not in (None, UserLevel.UNKNOWN) else state.level
     if LEVEL_RANK[level] > LEVEL_RANK[state.level]:
         logger.info("Exercise proposal rejected: practice level %s is above user level %s", level, state.level)
-        return
+        return None
 
     title = _text(proposal.title)
-    description = _text(proposal.description)
+    description = _text(_unescape_newlines(proposal.description))
     if not title or not description:
-        return
+        return None
 
     active = [e for e in exercises if e.status in ACTIVE_EXERCISE_STATUSES]
     if len(active) >= MAX_ACTIVE_EXERCISES:
         logger.info("Exercise proposal skipped: user %s already has %d active exercises", user_id, len(active))
-        return
+        return None
     if any(e.title.casefold() == title.casefold() for e in active):
-        return
+        return None
 
     minutes = proposal.estimated_minutes
-    session.add(
-        UserExercise(
-            user_id=user_id,
-            level=level,
-            title=title[:200],
-            description=description,
-            estimated_minutes=minutes if minutes and 0 < minutes <= 600 else None,
-            status=ExerciseStatus.SUGGESTED,
-            sources=[{"chunk_id": r.chunk_id, **_source_ref(r)} for r in rag_results] or None,
-        )
+    exercise = UserExercise(
+        user_id=user_id,
+        level=level,
+        title=title[:200],
+        description=description,
+        estimated_minutes=minutes if minutes and 0 < minutes <= 600 else None,
+        status=ExerciseStatus.SUGGESTED,
+        sources=[{"chunk_id": r.chunk_id, **_source_ref(r)} for r in rag_results] or None,
     )
+    session.add(exercise)
+    return exercise
 
 
 async def _get_or_create_chat_session(session: AsyncSession, user_id: uuid.UUID) -> ChatSession:
@@ -371,18 +405,18 @@ async def _post_assistant_message(
     *,
     used_fallback: bool = False,
     sources: list[dict] | None = None,
-) -> None:
-    session.add(
-        ChatMessage(
-            session_id=chat.id,
-            user_id=chat.user_id,
-            role=ChatRole.ASSISTANT,
-            content=content,
-            meta={"used_fallback": used_fallback, "sources": sources or []},
-        )
+) -> ChatMessage:
+    message = ChatMessage(
+        session_id=chat.id,
+        user_id=chat.user_id,
+        role=ChatRole.ASSISTANT,
+        content=content,
+        meta={"used_fallback": used_fallback, "sources": sources or []},
     )
+    session.add(message)
     chat.updated_at = utcnow()
     await session.commit()
+    return message
 
 
 async def _retrieve(retrieve: Retriever, query: str) -> list[RetrievalResult]:
@@ -412,3 +446,10 @@ def _scale(value: int | None) -> int | None:
 
 def _text(value: str | None) -> str | None:
     return value.strip() or None if value else None
+
+
+def _unescape_newlines(value: str) -> str:
+    # The model occasionally double-escapes line breaks in tool arguments ("\\n" instead of "\n").
+    if "\n" not in value and "\\n" in value:
+        return value.replace("\\n", "\n")
+    return value
