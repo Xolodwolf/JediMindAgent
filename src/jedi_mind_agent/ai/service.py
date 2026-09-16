@@ -21,7 +21,7 @@ class OpenAIChatService:
 
     async def respond(self, message: str, *, rag_context: str | None = None) -> tuple[str, bool]:
         if self._chat is None:
-            return self._fallback_answer("OPENAI_API_KEY is not configured."), True
+            return fallback_answer("OPENAI_API_KEY is not configured."), True
 
         system_prompt = build_rag_prompt(rag_context) if rag_context else SYSTEM_PROMPT
 
@@ -33,14 +33,14 @@ class OpenAIChatService:
                 ]
             )
         except Exception as exc:
-            return self._fallback_answer(f"LangChain/OpenAI error: {exc.__class__.__name__}."), True
+            return fallback_answer(f"LangChain/OpenAI error: {exc.__class__.__name__}."), True
 
         return str(response.content), False
 
-    @staticmethod
-    def _fallback_answer(reason: str) -> str:
-        return (
-            "OpenAI API сейчас недоступен для приложения. "
-            "Проверьте переменную OPENAI_API_KEY и настройки контейнера. "
-            f"Техническая причина: {reason}"
-        )
+
+def fallback_answer(reason: str) -> str:
+    return (
+        "OpenAI API сейчас недоступен для приложения. "
+        "Проверьте переменную OPENAI_API_KEY и настройки контейнера. "
+        f"Техническая причина: {reason}"
+    )

@@ -1,12 +1,15 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from jedi_mind_agent.api.v1.ai import router as ai_router
 from jedi_mind_agent.api.v1.rag import router as rag_router
 from jedi_mind_agent.core.config import get_settings
 from jedi_mind_agent.db.health import check_database
 from jedi_mind_agent.db.session import dispose_engine
+from jedi_mind_agent.web.router import STATIC_DIR
+from jedi_mind_agent.web.router import router as web_router
 
 
 @asynccontextmanager
@@ -20,6 +23,8 @@ settings = get_settings()
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(ai_router)
 app.include_router(rag_router)
+app.include_router(web_router)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/health")
