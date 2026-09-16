@@ -96,8 +96,34 @@ input[type="text"], select {
   color: var(--danger-text);
 }
 
-.empty { margin: auto; max-width: 440px; padding: 40px 20px; text-align: center; }
-.empty h1 { margin: 0 0 8px; font-size: 24px; }
+.flash-info { background: var(--done-bg); color: var(--done); }
+
+/* reset: <details> gives a two-step confirmation without JavaScript */
+
+.reset { position: relative; }
+.reset > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.reset > summary::-webkit-details-marker { display: none; }
+.reset[open] > summary { border-color: var(--danger-text); color: var(--danger-text); }
+.reset-confirm {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: 280px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+.reset-confirm p { margin: 0 0 10px; font-size: 13px; }
+button.danger { width: 100%; background: var(--danger-text); border-color: var(--danger-text); color: var(--surface); }
 
 /* layout */
 
