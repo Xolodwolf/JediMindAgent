@@ -51,7 +51,7 @@ body {
   color: var(--text);
 }
 
-button, input, select { font: inherit; color: inherit; }
+button, input, textarea { font: inherit; color: inherit; }
 
 button {
   cursor: pointer;
@@ -60,14 +60,19 @@ button {
   border-radius: 8px;
   background: var(--surface);
 }
-button:hover { border-color: var(--accent); }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { cursor: not-allowed; opacity: 0.55; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+button.danger { background: var(--danger-text); border-color: var(--danger-text); color: var(--surface); }
 
-input[type="text"], select {
-  padding: 6px 10px;
+textarea {
+  resize: none;
+  max-height: 160px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+  line-height: 1.4;
 }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -78,52 +83,15 @@ input[type="text"], select {
 
 .topbar {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 12px 16px;
+  gap: 16px;
   padding: 10px 20px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
 }
-.brand { margin-right: auto; font-weight: 650; color: var(--text); text-decoration: none; }
-.inline-form { display: flex; gap: 6px; }
+.brand { margin-right: auto; font-weight: 650; }
 
-.flash {
-  margin: 12px 20px 0;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--danger-bg);
-  color: var(--danger-text);
-}
-
-.flash-info { background: var(--done-bg); color: var(--done); }
-
-/* reset: <details> gives a two-step confirmation without JavaScript */
-
-.reset { position: relative; }
-.reset > summary {
-  list-style: none;
-  cursor: pointer;
-  padding: 6px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.reset > summary::-webkit-details-marker { display: none; }
-.reset[open] > summary { border-color: var(--danger-text); color: var(--danger-text); }
-.reset-confirm {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 10;
-  width: 280px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
-}
-.reset-confirm p { margin: 0 0 10px; font-size: 13px; }
-button.danger { width: 100%; background: var(--danger-text); border-color: var(--danger-text); color: var(--surface); }
+.noscript { margin: 12px 20px 0; padding: 8px 12px; border-radius: 8px; background: var(--danger-bg); color: var(--danger-text); }
 
 /* layout */
 
@@ -169,12 +137,13 @@ meter { display: block; width: 100%; height: 10px; margin: 4px 0 2px; }
 
 .chat { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 
-/* column-reverse keeps the log scrolled to the newest message without JavaScript */
-.chat-log { flex: 1; min-height: 0; display: flex; flex-direction: column-reverse; overflow-y: auto; padding: 16px; }
-.chat-log-inner { display: flex; flex-direction: column; gap: 10px; }
+/* app.js scrolls the log to the newest message whenever the conversation changes */
+.chat-log { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; }
+.chat-log-inner { display: flex; flex-direction: column; gap: 10px; min-height: 100%; }
 
 .msg { align-self: flex-start; max-width: 78%; padding: 10px 14px; border-radius: 14px; background: var(--surface-2); }
 .msg-user { align-self: flex-end; background: var(--user-bubble); }
+.msg-pending { opacity: 0.7; }
 .msg-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg-warn {
   display: inline-block;
@@ -188,16 +157,34 @@ meter { display: block; width: 100%; height: 10px; margin: 4px 0 2px; }
 .sources { margin-top: 6px; font-size: 12px; color: var(--muted); }
 .sources summary { cursor: pointer; }
 .sources ul { margin: 4px 0 0; padding-left: 18px; }
-.chat-empty { margin: auto; text-align: center; color: var(--muted); }
 
-.composer { display: flex; align-items: center; gap: 8px; padding: 12px 12px 4px; border-top: 1px solid var(--border); }
-.composer input[name="message"] { flex: 1; min-width: 0; }
-.composer-hint { margin: 0; padding: 0 12px 10px; font-size: 12px; }
-.rag-toggle { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.chat-empty { margin: auto; text-align: center; color: var(--muted); }
+.load-error { color: var(--danger-text); }
+.load-error p { margin: 0 0 10px; }
+
+.typing { align-self: flex-start; display: flex; align-items: center; gap: 4px; padding: 10px 14px; border-radius: 14px; background: var(--surface-2); }
+.typing .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: typing 1.2s infinite ease-in-out; }
+.typing .dot:nth-child(2) { animation-delay: 0.15s; }
+.typing .dot:nth-child(3) { animation-delay: 0.3s; }
+.typing-label { margin-left: 6px; font-size: 13px; color: var(--muted); }
+
+@keyframes typing {
+  0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing .dot { animation: none; }
+}
+
+.composer { display: flex; align-items: flex-end; gap: 8px; padding: 12px; border-top: 1px solid var(--border); }
+.composer textarea { flex: 1; min-width: 0; }
+.rag-toggle { display: flex; align-items: center; gap: 4px; padding-bottom: 8px; font-size: 13px; color: var(--muted); white-space: nowrap; }
 
 /* exercises */
 
 .ex { margin-bottom: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.ex[aria-busy="true"] { opacity: 0.6; }
 .ex summary { cursor: pointer; font-weight: 600; }
 .ex-desc { margin-top: 8px; font-size: 14px; white-space: pre-wrap; }
 .ex-meta { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--muted); }
@@ -212,6 +199,36 @@ meter { display: block; width: 100%; height: 10px; margin: 4px 0 2px; }
 .ex-actions .btn-completed { background: var(--done); border-color: var(--done); color: var(--on-accent); }
 
 .closed > summary { margin: 6px 0 10px; font-size: 13px; color: var(--muted); cursor: pointer; }
+
+/* dialog and toast */
+
+dialog {
+  max-width: 360px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+dialog::backdrop { background: rgb(0 0 0 / 40%); }
+dialog h3 { margin: 0 0 8px; font-size: 17px; }
+dialog p { margin: 0 0 16px; font-size: 14px; color: var(--muted); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: 20;
+  max-width: min(90vw, 520px);
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  transform: translateX(-50%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+.toast-info { background: var(--done-bg); color: var(--done); }
+.toast-error { background: var(--danger-bg); color: var(--danger-text); }
 
 @media (max-width: 960px) {
   .layout { grid-template-columns: 1fr; }

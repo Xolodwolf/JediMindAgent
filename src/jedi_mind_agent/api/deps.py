@@ -7,8 +7,10 @@ from jedi_mind_agent.db.session import get_session
 from jedi_mind_agent.product import service
 from jedi_mind_agent.product.models import User
 
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
-async def get_current_user(session: Annotated[AsyncSession, Depends(get_session)]) -> User:
+
+async def get_current_user(session: SessionDep) -> User:
     """The only place that decides who the current user is.
 
     The app is single-user for now. To support multiple users, replace this dependency with authentication;
