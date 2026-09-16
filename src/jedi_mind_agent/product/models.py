@@ -109,8 +109,6 @@ class UserExercise(UuidPk, Timestamps, Base):
     status: Mapped[ExerciseStatus] = mapped_column(EXERCISE_STATUS, default=ExerciseStatus.SUGGESTED)
     # RAG chunks live in ChromaDB, so references are stored as JSON instead of foreign keys.
     sources: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ReadinessCheck(UuidPk, CreatedAt, Base):

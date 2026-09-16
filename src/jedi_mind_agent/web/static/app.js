@@ -2,6 +2,7 @@ import { api } from "./api.js";
 import { renderChat } from "./views/chat.js";
 import { renderExercises } from "./views/exercises.js";
 import { renderState } from "./views/state.js";
+import { toggleInSet } from "./views/dom.js";
 
 const RAG_STORAGE_KEY = "jediMindAgent.useRag";
 
@@ -30,7 +31,8 @@ const store = {
   busyExercises: new Set(),
   openExercises: new Set(),
   openSources: new Set(),
-  closedOpen: false,
+  openSections: new Set(["suggested", "suitable"]),
+  confirmDeleteId: null, // deletion needs a second click on the same exercise
 };
 
 let chatSignature = "";
@@ -60,9 +62,11 @@ function render() {
     exercises: store.exercises,
     busyIds: store.busyExercises,
     openIds: store.openExercises,
-    closedOpen: store.closedOpen,
+    openSections: store.openSections,
+    confirmDeleteId: store.confirmDeleteId,
     onAction: changeExerciseStatus,
-    onClosedToggle: (open) => (store.closedOpen = open),
+    onDelete: deleteExercise,
+    onSectionToggle: (status, open) => toggleInSet(store.openSections, status, open),
   });
   els.input.disabled = store.busy;
   els.send.disabled = store.busy;
@@ -137,10 +141,43 @@ async function checkReadiness() {
 
 async function changeExerciseStatus(id, status) {
   if (store.busyExercises.has(id)) return;
+  store.confirmDeleteId = null;
   store.busyExercises.add(id);
   render();
   try {
     mergeExercises([await api.setExerciseStatus(id, status)]);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    store.busyExercises.delete(id);
+    render();
+  }
+}
+
+let confirmDeleteTimer;
+async function deleteExercise(id) {
+  if (store.busyExercises.has(id)) return;
+
+  if (store.confirmDeleteId !== id) {
+    store.confirmDeleteId = id;
+    render();
+    clearTimeout(confirmDeleteTimer);
+    confirmDeleteTimer = setTimeout(() => {
+      if (store.confirmDeleteId === id) {
+        store.confirmDeleteId = null;
+        render();
+      }
+    }, 4000);
+    return;
+  }
+
+  store.confirmDeleteId = null;
+  store.busyExercises.add(id);
+  render();
+  try {
+    await api.deleteExercise(id);
+    store.exercises = store.exercises.filter((exercise) => exercise.id !== id);
+    store.openExercises.delete(id);
   } catch (error) {
     showToast(error.message, "error");
   } finally {

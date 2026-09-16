@@ -12,12 +12,8 @@ class UserLevel(StrEnum):
 
 class ExerciseStatus(StrEnum):
     SUGGESTED = "suggested"
-    ACCEPTED = "accepted"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    SKIPPED = "skipped"
+    SUITABLE = "suitable"
     NOT_SUITABLE = "not_suitable"
-    CANCELLED = "cancelled"
 
 
 class ChatRole(StrEnum):
@@ -33,13 +29,12 @@ class ReadinessResult(StrEnum):
     NOT_READY = "not_ready"
 
 
+# Exercises are not performed, only evaluated — the book's "keep / discard". The evaluation can be changed later.
 EXERCISE_TRANSITIONS: dict[ExerciseStatus, tuple[ExerciseStatus, ...]] = {
-    ExerciseStatus.SUGGESTED: (ExerciseStatus.ACCEPTED, ExerciseStatus.SKIPPED, ExerciseStatus.NOT_SUITABLE),
-    ExerciseStatus.ACCEPTED: (ExerciseStatus.IN_PROGRESS, ExerciseStatus.SKIPPED, ExerciseStatus.NOT_SUITABLE),
-    ExerciseStatus.IN_PROGRESS: (ExerciseStatus.COMPLETED, ExerciseStatus.NOT_SUITABLE, ExerciseStatus.CANCELLED),
+    ExerciseStatus.SUGGESTED: (ExerciseStatus.SUITABLE, ExerciseStatus.NOT_SUITABLE),
+    ExerciseStatus.SUITABLE: (ExerciseStatus.NOT_SUITABLE,),
+    ExerciseStatus.NOT_SUITABLE: (ExerciseStatus.SUITABLE,),
 }
-
-ACTIVE_EXERCISE_STATUSES = frozenset(EXERCISE_TRANSITIONS)
 
 LEVEL_RANK: dict[UserLevel, int] = {
     UserLevel.UNKNOWN: 0,
