@@ -5,7 +5,7 @@ import uuid
 from collections.abc import Callable, Sequence
 
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jedi_mind_agent.ai.agent import History, JediAgent
@@ -36,9 +36,13 @@ from jedi_mind_agent.rag.schemas import RetrievalResult
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_USERNAME = "default"
 HISTORY_LIMIT = 20
 MAX_ACTIVE_EXERCISES = 3
 READINESS_MIN_COMPLETED = 1
+
+# Everything a reset deletes. Chat messages come before chat sessions because they reference them.
+USER_DATA_MODELS = (ChatMessage, ChatSession, UserExercise, ReadinessCheck, UserStatusLog)
 
 Retriever = Callable[[str], list[RetrievalResult]]
 
@@ -48,14 +52,6 @@ class DomainError(Exception):
 
 
 # --- queries -----------------------------------------------------------------
-
-
-async def list_users(session: AsyncSession) -> list[User]:
-    return list(await session.scalars(select(User).order_by(User.username)))
-
-
-async def get_user(session: AsyncSession, user_id: uuid.UUID) -> User | None:
-    return await session.get(User, user_id)
 
 
 async def get_state(session: AsyncSession, user_id: uuid.UUID) -> UserState:
@@ -115,6 +111,27 @@ async def get_or_create_user(session: AsyncSession, username: str) -> User:
     session.add(UserState(user_id=user.id, level=UserLevel.UNKNOWN))
     await session.commit()
     return user
+
+
+async def reset_user(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """Delete all of the user's product data in one transaction. The user and an empty state remain."""
+    for model in USER_DATA_MODELS:
+        await session.execute(delete(model).where(model.user_id == user_id))
+
+    await session.execute(
+        update(UserState)
+        .where(UserState.user_id == user_id)
+        .values(
+            level=UserLevel.UNKNOWN,
+            energy_level=None,
+            focus_level=None,
+            main_problem=None,
+            time_limit_minutes=None,
+            diagnostic_completed_at=None,
+            updated_at=utcnow(),
+        )
+    )
+    await session.commit()
 
 
 async def change_exercise_status(

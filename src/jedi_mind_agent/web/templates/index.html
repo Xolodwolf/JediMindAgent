@@ -3,40 +3,29 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>JediMindAgent{% if user %} · {{ user.username }}{% endif %}</title>
+  <title>JediMindAgent</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/">JediMindAgent</a>
 
-    <form class="inline-form" method="get" action="/">
-      <select name="user_id" aria-label="Пользователь" required>
-        <option value="" disabled {% if not user %}selected{% endif %}>выберите пользователя</option>
-        {% for u in users %}
-        <option value="{{ u.id }}" {% if user and u.id == user.id %}selected{% endif %}>{{ u.username }}</option>
-        {% endfor %}
-      </select>
-      <button type="submit">Открыть</button>
-    </form>
-
-    <form class="inline-form" method="post" action="/users">
-      <input type="text" name="username" placeholder="новый пользователь" maxlength="50" required aria-label="Имя нового пользователя">
-      <button type="submit">Создать</button>
-    </form>
+    <details class="reset">
+      <summary>Начать сначала</summary>
+      <form class="reset-confirm" method="post" action="/reset">
+        <p>Будут удалены история чата, упражнения, проверки готовности и состояние. Отменить это нельзя.</p>
+        <button type="submit" class="danger">Да, удалить всё</button>
+      </form>
+    </details>
   </header>
 
   {% if error %}
   <div class="flash" role="alert">{{ error }}</div>
   {% endif %}
+  {% if notice %}
+  <div class="flash flash-info" role="status">{{ notice }}</div>
+  {% endif %}
 
-  {% if not user %}
-  <main class="empty">
-    <h1>Путь джедая</h1>
-    <p>Выберите пользователя или создайте нового, чтобы начать диагностику.</p>
-    <p class="muted">У каждого пользователя своя история чата, состояние и упражнения — так можно проверять память агента.</p>
-  </main>
-  {% else %}
   <main class="layout">
 
     <aside class="panel">
@@ -82,7 +71,7 @@
       {% endif %}
 
       <div class="readiness">
-        <form method="post" action="/users/{{ user.id }}/readiness">
+        <form method="post" action="/readiness">
           <button type="submit">Проверить готовность</button>
         </form>
         {% if last_check %}
@@ -121,7 +110,7 @@
         </div>
       </div>
 
-      <form class="composer" method="post" action="/users/{{ user.id }}/chat">
+      <form class="composer" method="post" action="/chat">
         <input type="text" name="message" maxlength="4000" required autocomplete="off" autofocus
                placeholder="Сообщение агенту… (Enter — отправить)" aria-label="Сообщение">
         <label class="rag-toggle">
@@ -149,7 +138,7 @@
         </div>
         <div class="ex-actions">
           {% for target, label in actions[e.status] %}
-          <form method="post" action="/users/{{ user.id }}/exercises/{{ e.id }}/status">
+          <form method="post" action="/exercises/{{ e.id }}/status">
             <input type="hidden" name="status" value="{{ target.value }}">
             <button type="submit" class="btn-{{ target.value }}">{{ label }}</button>
           </form>
@@ -179,6 +168,5 @@
     </aside>
 
   </main>
-  {% endif %}
 </body>
 </html>
