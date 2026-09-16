@@ -3,7 +3,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from jedi_mind_agent.ai.agent import JediAgent, get_agent
 from jedi_mind_agent.api.deps import CurrentUser, SessionDep
@@ -90,6 +90,15 @@ async def update_exercise(
     except service.DomainError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ExerciseOut.from_model(exercise)
+
+
+@router.delete("/exercises/{exercise_id}", status_code=204)
+async def delete_exercise(exercise_id: uuid.UUID, session: SessionDep, user: CurrentUser) -> Response:
+    try:
+        await service.delete_exercise(session, user_id=user.id, exercise_id=exercise_id)
+    except service.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(status_code=204)
 
 
 def _retrieve(query: str) -> list[RetrievalResult]:

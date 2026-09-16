@@ -13,7 +13,6 @@ from jedi_mind_agent.ai.agent import History, JediAgent
 from jedi_mind_agent.ai.schemas import DiagnosticUpdate, ExerciseProposal
 from jedi_mind_agent.ai.service import fallback_answer
 from jedi_mind_agent.product.enums import (
-    ACTIVE_EXERCISE_STATUSES,
     EXERCISE_TRANSITIONS,
     LEVEL_RANK,
     NEXT_LEVEL,
@@ -39,8 +38,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_USERNAME = "default"
 HISTORY_LIMIT = 20
-MAX_ACTIVE_EXERCISES = 3
-READINESS_MIN_COMPLETED = 1
+# The book suggests working on a small portion of practices at a time.
+MAX_NEW_EXERCISES = 3
+READINESS_MIN_SUITABLE = 1
 
 # Everything a reset deletes. Chat messages come before chat sessions because they reference them.
 USER_DATA_MODELS = (ChatMessage, ChatSession, UserExercise, ReadinessCheck, UserStatusLog)
@@ -171,12 +171,16 @@ async def change_exercise_status(
         raise DomainError(f"Недопустимый переход статуса: {exercise.status} → {target}.")
 
     exercise.status = target
-    if target == ExerciseStatus.IN_PROGRESS:
-        exercise.started_at = utcnow()
-    elif target == ExerciseStatus.COMPLETED:
-        exercise.completed_at = utcnow()
     await session.commit()
     return exercise
+
+
+async def delete_exercise(session: AsyncSession, *, user_id: uuid.UUID, exercise_id: uuid.UUID) -> None:
+    exercise = await session.get(UserExercise, exercise_id)
+    if exercise is None or exercise.user_id != user_id:
+        raise NotFoundError("Упражнение не найдено.")
+    await session.delete(exercise)
+    await session.commit()
 
 
 async def handle_chat_message(
@@ -243,14 +247,14 @@ async def run_readiness_check(session: AsyncSession, *, user_id: uuid.UUID, agen
         return ReadinessOutcome(message, state)
 
     exercises = await list_exercises(session, user_id)
-    completed = [e for e in exercises if e.status == ExerciseStatus.COMPLETED and e.level == from_level]
+    suitable = [e for e in exercises if e.status == ExerciseStatus.SUITABLE and e.level == from_level]
 
-    # Deterministic gate: without completed practice the LLM is not asked at all.
-    if len(completed) < READINESS_MIN_COMPLETED:
+    # Deterministic gate: without a practice that suits the user at this level the LLM is not asked at all.
+    if len(suitable) < READINESS_MIN_SUITABLE:
         result = ReadinessResult.NOT_READY
         summary = (
-            "На текущем уровне пока нет выполненных упражнений. "
-            "Выполните хотя бы одно из предложенных и попробуйте проверку снова."
+            "На текущем уровне пока нет подошедших практик. "
+            "Отметьте хотя бы одну практику как подходящую и попробуйте проверку снова."
         )
     else:
         history = await list_messages(session, chat.id, limit=HISTORY_LIMIT)
@@ -299,13 +303,14 @@ def build_user_context(state: UserState, exercises: Sequence[UserExercise]) -> s
         f"- время на практики, минут в день: {show(state.time_limit_minutes)}",
     ]
 
-    active = [e for e in exercises if e.status in ACTIVE_EXERCISE_STATUSES]
-    closed = [e for e in exercises if e.status not in ACTIVE_EXERCISE_STATUSES][:10]
-    lines.append("Активные упражнения:" if active else "Активные упражнения: нет")
-    lines.extend(f"- {e.title} [{e.status}, {e.level}]" for e in active)
-    if closed:
-        lines.append("Недавно закрытые упражнения:")
-        lines.extend(f"- {e.title} [{e.status}, {e.level}]" for e in closed)
+    for label, status in (
+        ("Новые упражнения, ещё не оценены", ExerciseStatus.SUGGESTED),
+        ("Упражнения, которые подошли", ExerciseStatus.SUITABLE),
+        ("Упражнения, которые не подошли", ExerciseStatus.NOT_SUITABLE),
+    ):
+        items = [e for e in exercises if e.status == status][:10]
+        lines.append(f"{label}:" if items else f"{label}: нет")
+        lines.extend(f"- {e.title} [{e.level}]" for e in items)
     return "\n".join(lines)
 
 
@@ -368,11 +373,12 @@ def _apply_exercise_proposal(
     if not title or not description:
         return None
 
-    active = [e for e in exercises if e.status in ACTIVE_EXERCISE_STATUSES]
-    if len(active) >= MAX_ACTIVE_EXERCISES:
-        logger.info("Exercise proposal skipped: user %s already has %d active exercises", user_id, len(active))
+    new = [e for e in exercises if e.status == ExerciseStatus.SUGGESTED]
+    if len(new) >= MAX_NEW_EXERCISES:
+        logger.info("Exercise proposal skipped: user %s already has %d unevaluated exercises", user_id, len(new))
         return None
-    if any(e.title.casefold() == title.casefold() for e in active):
+    # Never re-suggest a practice the user already has, including one that did not suit them.
+    if any(e.title.casefold() == title.casefold() for e in exercises):
         return None
 
     minutes = proposal.estimated_minutes

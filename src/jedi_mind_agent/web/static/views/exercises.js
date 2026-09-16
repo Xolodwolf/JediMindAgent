@@ -1,54 +1,49 @@
 import { h, toggleInSet } from "./dom.js";
 
-const STATUS_LABELS = {
-  suggested: "предложено",
-  accepted: "принято",
-  in_progress: "выполняю",
-  completed: "выполнено",
-  skipped: "пропущено",
-  not_suitable: "не подошло",
-  cancelled: "отменено",
-};
-
 const ACTION_LABELS = {
-  accepted: "Принять",
-  in_progress: "Начать",
-  completed: "Выполнено",
-  skipped: "Пропустить",
-  not_suitable: "Не подошло",
-  cancelled: "Отменить",
+  suitable: "Подходит",
+  not_suitable: "Не подходит",
 };
 
-export function renderExercises(root, { exercises, busyIds, openIds, closedOpen, onAction, onClosedToggle }) {
+const SECTIONS = [
+  { status: "suggested", title: "Новые" },
+  { status: "suitable", title: "Подходят" },
+  { status: "not_suitable", title: "Не подходят" },
+];
+
+export function renderExercises(root, props) {
+  const { exercises, openSections, onSectionToggle } = props;
   if (!exercises) {
     root.replaceChildren(h("p", { class: "muted" }, "Загрузка…"));
     return;
   }
-
-  // The server sends the allowed transitions; an exercise without any is closed.
-  const active = exercises.filter((exercise) => exercise.actions.length > 0);
-  const closed = exercises.filter((exercise) => exercise.actions.length === 0);
-  const card = (exercise) => exerciseCard(exercise, { busy: busyIds.has(exercise.id), openIds, onAction });
-
-  const nodes = active.length
-    ? active.map(card)
-    : [h("p", { class: "muted" }, "Пока нет упражнений. Агент предложит их после диагностики.")];
-
-  if (closed.length) {
-    nodes.push(
-      h(
-        "details",
-        { class: "closed", open: closedOpen, ontoggle: (event) => onClosedToggle(event.currentTarget.open) },
-        h("summary", {}, `Завершённые (${closed.length})`),
-        closed.map(card),
-      ),
-    );
+  if (!exercises.length) {
+    root.replaceChildren(h("p", { class: "muted" }, "Пока нет упражнений. Агент предложит их после диагностики."));
+    return;
   }
 
-  root.replaceChildren(...nodes);
+  const nodes = SECTIONS.map((section) => {
+    const items = exercises.filter((exercise) => exercise.status === section.status);
+    if (!items.length) return null;
+    return h(
+      "details",
+      {
+        class: `ex-section ex-section-${section.status}`,
+        open: openSections.has(section.status),
+        ontoggle: (event) => onSectionToggle(section.status, event.currentTarget.open),
+      },
+      h("summary", {}, `${section.title} (${items.length})`),
+      items.map((exercise) => exerciseCard(exercise, props)),
+    );
+  });
+
+  root.replaceChildren(...nodes.filter(Boolean));
 }
 
-function exerciseCard(exercise, { busy, openIds, onAction }) {
+function exerciseCard(exercise, { busyIds, openIds, confirmDeleteId, onAction, onDelete }) {
+  const busy = busyIds.has(exercise.id);
+  const confirming = confirmDeleteId === exercise.id;
+
   return h(
     "article",
     { class: `ex ex-${exercise.status}`, "aria-busy": busy ? "true" : null },
@@ -61,21 +56,30 @@ function exerciseCard(exercise, { busy, openIds, onAction }) {
     h(
       "div",
       { class: "ex-meta" },
-      h("span", { class: `badge badge-${exercise.status}` }, STATUS_LABELS[exercise.status] ?? exercise.status),
       h("span", {}, `ур. ${exercise.level_rank}`),
       exercise.estimated_minutes && h("span", {}, `≈ ${exercise.estimated_minutes} мин`),
     ),
-    exercise.actions.length > 0 &&
-      h(
-        "div",
-        { class: "ex-actions" },
-        exercise.actions.map((target) =>
-          h(
-            "button",
-            { type: "button", class: `btn-${target}`, disabled: busy, onclick: () => onAction(exercise.id, target) },
-            ACTION_LABELS[target] ?? target,
-          ),
+    h(
+      "div",
+      { class: "ex-actions" },
+      // The server sends the allowed evaluations; the UI only renders them.
+      exercise.actions.map((target) =>
+        h(
+          "button",
+          { type: "button", class: `btn-${target}`, disabled: busy, onclick: () => onAction(exercise.id, target) },
+          ACTION_LABELS[target] ?? target,
         ),
       ),
+      h(
+        "button",
+        {
+          type: "button",
+          class: confirming ? "btn-delete confirm" : "btn-delete",
+          disabled: busy,
+          onclick: () => onDelete(exercise.id),
+        },
+        confirming ? "Точно удалить?" : "Удалить",
+      ),
+    ),
   );
 }
