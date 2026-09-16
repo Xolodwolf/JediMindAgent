@@ -6,6 +6,8 @@ class UserLevel(StrEnum):
     LEVEL_1 = "level_1"
     LEVEL_2 = "level_2"
     LEVEL_3 = "level_3"
+    LEVEL_4 = "level_4"
+    LEVEL_5 = "level_5"
 
 
 class ExerciseStatus(StrEnum):
@@ -39,7 +41,18 @@ EXERCISE_TRANSITIONS: dict[ExerciseStatus, tuple[ExerciseStatus, ...]] = {
 
 ACTIVE_EXERCISE_STATUSES = frozenset(EXERCISE_TRANSITIONS)
 
+LEVEL_RANK: dict[UserLevel, int] = {
+    UserLevel.UNKNOWN: 0,
+    UserLevel.LEVEL_1: 1,
+    UserLevel.LEVEL_2: 2,
+    UserLevel.LEVEL_3: 3,
+    UserLevel.LEVEL_4: 4,
+    UserLevel.LEVEL_5: 5,
+}
+
 NEXT_LEVEL: dict[UserLevel, UserLevel] = {
     UserLevel.LEVEL_1: UserLevel.LEVEL_2,
     UserLevel.LEVEL_2: UserLevel.LEVEL_3,
+    UserLevel.LEVEL_3: UserLevel.LEVEL_4,
+    UserLevel.LEVEL_4: UserLevel.LEVEL_5,
 }

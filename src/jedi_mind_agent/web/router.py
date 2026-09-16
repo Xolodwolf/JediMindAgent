@@ -20,6 +20,7 @@ from jedi_mind_agent.product import service
 from jedi_mind_agent.product.enums import (
     ACTIVE_EXERCISE_STATUSES,
     EXERCISE_TRANSITIONS,
+    LEVEL_RANK,
     ExerciseStatus,
     ReadinessResult,
     UserLevel,
@@ -41,9 +42,11 @@ MESSAGE_MAX = 4000
 
 LEVEL_LABELS = {
     UserLevel.UNKNOWN: "не определён",
-    UserLevel.LEVEL_1: "1 · перегруз",
-    UserLevel.LEVEL_2: "2 · базовые практики",
-    UserLevel.LEVEL_3: "3 · системное улучшение",
+    UserLevel.LEVEL_1: "1 · Все горит",
+    UserLevel.LEVEL_2: "2 · Ночь простоять да день продержаться",
+    UserLevel.LEVEL_3: "3 · Есть свет в конце тоннеля",
+    UserLevel.LEVEL_4: "4 · Планомерно к намеченным целям",
+    UserLevel.LEVEL_5: "5 · Естественно, спонтанно и все во благо",
 }
 STATUS_LABELS = {
     ExerciseStatus.SUGGESTED: "предложено",
@@ -83,6 +86,7 @@ async def index(
         "error": error,
         "rag": rag,
         "level_labels": LEVEL_LABELS,
+        "level_rank": LEVEL_RANK,
         "status_labels": STATUS_LABELS,
         "readiness_labels": READINESS_LABELS,
         "actions": {status: [(t, ACTION_LABELS[t]) for t in targets] for status, targets in EXERCISE_TRANSITIONS.items()},

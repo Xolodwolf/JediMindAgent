@@ -18,28 +18,30 @@ class ChatResponse(BaseModel):
 
 # Structured outputs of the product agent. Value ranges are deliberately not enforced here:
 # an out-of-range number must not discard the whole reply, the domain service drops it instead.
+# Field descriptions are sent to the model as part of the tool schema, so they are in Russian.
 
 
 class DiagnosticUpdate(BaseModel):
-    level: UserLevel | None = Field(default=None, description="User level, only when the evidence is sufficient.")
-    energy_level: int | None = Field(default=None, description="Mental fuel ('мыслетопливо'), 1-10.")
-    focus_level: int | None = Field(default=None, description="Ability to focus, 1-10.")
-    main_problem: str | None = Field(default=None, description="The user's main problem, one short sentence.")
-    time_limit_minutes: int | None = Field(default=None, description="Minutes per day the user can spend on practice.")
+    level: UserLevel | None = Field(default=None, description="Уровень пользователя — только при достаточных основаниях.")
+    energy_level: int | None = Field(default=None, description="Мыслетопливо, от 1 до 10.")
+    focus_level: int | None = Field(default=None, description="Способность сосредоточиться, от 1 до 10.")
+    main_problem: str | None = Field(default=None, description="Главная проблема пользователя, одно короткое предложение.")
+    time_limit_minutes: int | None = Field(default=None, description="Сколько минут в день пользователь готов уделять практикам.")
 
 
 class ExerciseProposal(BaseModel):
-    title: str = Field(description="Short exercise title.")
-    description: str = Field(description="Why it helps, numbered steps, expected result. Adapted to the user.")
-    estimated_minutes: int | None = Field(default=None, description="Approximate duration in minutes.")
+    title: str = Field(description="Короткое название упражнения.")
+    description: str = Field(description="Зачем нужно, пронумерованные шаги, ожидаемый результат. Адаптировано под пользователя.")
+    level: UserLevel | None = Field(default=None, description="Уровень, к которому относится практика; не выше уровня пользователя.")
+    estimated_minutes: int | None = Field(default=None, description="Примерная длительность в минутах.")
 
 
 class AgentReply(BaseModel):
-    answer: str = Field(description="Message shown to the user.")
-    diagnostic: DiagnosticUpdate | None = Field(default=None, description="New facts about the user's state.")
-    exercise: ExerciseProposal | None = Field(default=None, description="One exercise to suggest, if appropriate.")
+    answer: str = Field(description="Сообщение, которое увидит пользователь.")
+    diagnostic: DiagnosticUpdate | None = Field(default=None, description="Новые сведения о состоянии пользователя.")
+    exercise: ExerciseProposal | None = Field(default=None, description="Одно упражнение, если его уместно предложить.")
 
 
 class ReadinessAssessment(BaseModel):
     result: ReadinessResult
-    summary: str = Field(description="2-4 sentences for the user: the result and what to do next.")
+    summary: str = Field(description="2–4 предложения для пользователя: результат и что делать дальше.")

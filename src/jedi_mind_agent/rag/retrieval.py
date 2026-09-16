@@ -34,6 +34,6 @@ def get_retrieval_service() -> RagRetrievalService:
 def format_rag_context(results: list[RetrievalResult]) -> str:
     blocks = []
     for index, result in enumerate(results, start=1):
-        source = f"{result.source_title or result.source_filename}, pages {result.page_start}-{result.page_end}"
-        blocks.append(f"[{index}] Source: {source}\n{result.text}")
+        source = f"{result.source_title or result.source_filename}, стр. {result.page_start}–{result.page_end}"
+        blocks.append(f"[{index}] Источник: {source}\n{result.text}")
     return "\n\n".join(blocks)
