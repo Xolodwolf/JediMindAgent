@@ -4,27 +4,27 @@ import logging
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jedi_mind_agent.ai.agent import History, JediAgent
 from jedi_mind_agent.ai.schemas import DiagnosticUpdate, ExerciseProposal
-from jedi_mind_agent.ai.service import fallback_answer
+from jedi_mind_agent.product import level_test
 from jedi_mind_agent.product.enums import (
     EXERCISE_TRANSITIONS,
     LEVEL_RANK,
-    NEXT_LEVEL,
+    LEVEL_TITLES,
     ChatRole,
     ExerciseStatus,
-    ReadinessResult,
     UserLevel,
 )
 from jedi_mind_agent.product.models import (
     ChatMessage,
     ChatSession,
-    ReadinessCheck,
+    LevelTest,
     User,
     UserExercise,
     UserState,
@@ -40,10 +40,9 @@ DEFAULT_USERNAME = "default"
 HISTORY_LIMIT = 20
 # The book suggests working on a small portion of practices at a time.
 MAX_NEW_EXERCISES = 3
-READINESS_MIN_SUITABLE = 1
 
 # Everything a reset deletes. Chat messages come before chat sessions because they reference them.
-USER_DATA_MODELS = (ChatMessage, ChatSession, UserExercise, ReadinessCheck, UserStatusLog)
+USER_DATA_MODELS = (ChatMessage, ChatSession, UserExercise, LevelTest, UserStatusLog)
 
 Retriever = Callable[[str], list[RetrievalResult]]
 
@@ -58,17 +57,11 @@ class NotFoundError(DomainError):
 
 @dataclass
 class ChatTurn:
-    user_message: ChatMessage
-    assistant_message: ChatMessage
+    """Messages created by one user action, in chronological order, and the resulting state."""
+
+    messages: list[ChatMessage]
     state: UserState
     new_exercises: list[UserExercise] = field(default_factory=list)
-
-
-@dataclass
-class ReadinessOutcome:
-    message: ChatMessage
-    state: UserState
-    check: ReadinessCheck | None = None
 
 
 # --- queries -----------------------------------------------------------------
@@ -89,12 +82,14 @@ async def find_chat_session(session: AsyncSession, user_id: uuid.UUID) -> ChatSe
     )
 
 
-async def list_messages(session: AsyncSession, chat_session_id: uuid.UUID, limit: int | None = None) -> list[ChatMessage]:
-    stmt = (
-        select(ChatMessage)
-        .where(ChatMessage.session_id == chat_session_id)
-        .order_by(ChatMessage.created_at.desc())
-    )
+async def list_messages(
+    session: AsyncSession, chat_session_id: uuid.UUID, limit: int | None = None, *, exclude_test: bool = False
+) -> list[ChatMessage]:
+    stmt = select(ChatMessage).where(ChatMessage.session_id == chat_session_id)
+    if exclude_test:
+        # Test questions and answers stay in the chat, but never take up the agent's history window.
+        stmt = stmt.where(or_(ChatMessage.meta.is_(None), ~ChatMessage.meta.has_key("test")))
+    stmt = stmt.order_by(ChatMessage.created_at.desc())
     if limit is not None:
         stmt = stmt.limit(limit)
     return list(reversed((await session.scalars(stmt)).all()))
@@ -113,11 +108,11 @@ async def list_exercises(session: AsyncSession, user_id: uuid.UUID) -> list[User
     )
 
 
-async def last_readiness_check(session: AsyncSession, user_id: uuid.UUID) -> ReadinessCheck | None:
+async def find_active_test(session: AsyncSession, user_id: uuid.UUID) -> LevelTest | None:
     return await session.scalar(
-        select(ReadinessCheck)
-        .where(ReadinessCheck.user_id == user_id)
-        .order_by(ReadinessCheck.created_at.desc())
+        select(LevelTest)
+        .where(LevelTest.user_id == user_id, LevelTest.completed_at.is_(None))
+        .order_by(LevelTest.created_at.desc())
         .limit(1)
     )
 
@@ -183,6 +178,23 @@ async def delete_exercise(session: AsyncSession, *, user_id: uuid.UUID, exercise
     await session.commit()
 
 
+async def start_level_test(session: AsyncSession, *, user_id: uuid.UUID, restart: bool) -> ChatTurn:
+    """Ask the first test question in the chat. Without `restart` an unfinished test is resumed as it is."""
+    state = await get_state(session, user_id)
+    active = await find_active_test(session, user_id)
+    if active is not None:
+        if not restart:
+            return ChatTurn([], state)
+        await session.delete(active)
+
+    chat = await _get_or_create_chat_session(session, user_id)
+    test = LevelTest(user_id=user_id, answers=[])
+    session.add(test)
+    await session.flush()
+    question = await _post_test_question(session, chat, test, step=0, prefix=level_test.INTRO)
+    return ChatTurn([question], state)
+
+
 async def handle_chat_message(
     session: AsyncSession,
     *,
@@ -191,16 +203,23 @@ async def handle_chat_message(
     agent: JediAgent,
     retrieve: Retriever | None,
 ) -> ChatTurn:
+    state = await get_state(session, user_id)
+    test = await find_active_test(session, user_id)
+    if test is not None:
+        return await _answer_level_test(session, test=test, state=state, text=text, agent=agent)
+
     chat = await _get_or_create_chat_session(session, user_id)
-    user_message = ChatMessage(session_id=chat.id, user_id=user_id, role=ChatRole.USER, content=text)
-    session.add(user_message)
-    chat.updated_at = utcnow()
+    user_message = _add_message(session, chat, ChatRole.USER, text)
     # Commit before the LLM call: the user's message survives an agent failure.
     await session.commit()
 
-    state = await get_state(session, user_id)
+    if state.level == UserLevel.UNKNOWN:
+        # Only the test sets the level, so a conversation without a level starts with the test.
+        turn = await start_level_test(session, user_id=user_id, restart=False)
+        return ChatTurn([user_message, *turn.messages], turn.state)
+
     exercises = await list_exercises(session, user_id)
-    history = await list_messages(session, chat.id, limit=HISTORY_LIMIT)
+    history = await list_messages(session, chat.id, limit=HISTORY_LIMIT, exclude_test=True)
     rag_results = await _retrieve(retrieve, text) if retrieve else []
 
     reply, used_fallback = await agent.reply(
@@ -216,76 +235,105 @@ async def handle_chat_message(
         if exercise is not None:
             new_exercises.append(exercise)
 
-    assistant_message = await _post_assistant_message(
+    assistant_message = _add_message(
         session,
         chat,
+        ChatRole.ASSISTANT,
         _unescape_newlines(reply.answer),
-        used_fallback=used_fallback,
-        sources=[_source_ref(result) for result in rag_results],
+        {"used_fallback": used_fallback, "sources": [_source_ref(result) for result in rag_results]},
     )
-    return ChatTurn(user_message, assistant_message, state, new_exercises)
+    await session.commit()
+    return ChatTurn([user_message, assistant_message], state, new_exercises)
 
 
-async def run_readiness_check(session: AsyncSession, *, user_id: uuid.UUID, agent: JediAgent) -> ReadinessOutcome:
-    state = await get_state(session, user_id)
-    chat = await _get_or_create_chat_session(session, user_id)
-    from_level = state.level
+# --- level test --------------------------------------------------------------
 
-    if from_level == UserLevel.UNKNOWN:
-        message = await _post_assistant_message(
-            session,
-            chat,
-            "Уровень пока не определён. Расскажите в чате о своём состоянии — после диагностики можно проверить готовность.",
-        )
-        return ReadinessOutcome(message, state)
 
-    target_level = NEXT_LEVEL.get(from_level)
-    if target_level is None:
-        message = await _post_assistant_message(
-            session, chat, "Вы уже на последнем уровне. Продолжайте закреплять практики."
-        )
-        return ReadinessOutcome(message, state)
+async def _answer_level_test(
+    session: AsyncSession, *, test: LevelTest, state: UserState, text: str, agent: JediAgent
+) -> ChatTurn:
+    """Handle a chat message as a test answer. Deterministic: the LLM only explains the final result."""
+    chat = await _get_or_create_chat_session(session, test.user_id)
+    step = len(test.answers)
+    choice = level_test.parse_choice(text, step)
 
-    exercises = await list_exercises(session, user_id)
-    suitable = [e for e in exercises if e.status == ExerciseStatus.SUITABLE and e.level == from_level]
-
-    # Deterministic gate: without a practice that suits the user at this level the LLM is not asked at all.
-    if len(suitable) < READINESS_MIN_SUITABLE:
-        result = ReadinessResult.NOT_READY
-        summary = (
-            "На текущем уровне пока нет подошедших практик. "
-            "Отметьте хотя бы одну практику как подходящую и попробуйте проверку снова."
-        )
-    else:
-        history = await list_messages(session, chat.id, limit=HISTORY_LIMIT)
-        assessment = await agent.assess_readiness(
-            user_context=build_user_context(state, exercises), history=_to_history(history)
-        )
-        if assessment is None:
-            message = await _post_assistant_message(
-                session, chat, fallback_answer("readiness assessment is unavailable."), used_fallback=True
-            )
-            return ReadinessOutcome(message, state)
-        result, summary = assessment.result, assessment.summary
-
-    if result == ReadinessResult.READY:
-        state.level = target_level
-        session.add(
-            UserStatusLog(
-                user_id=user_id,
-                level=target_level,
-                energy_level=state.energy_level,
-                focus_level=state.focus_level,
-                summary=f"Readiness check: {from_level} -> {target_level}",
-            )
-        )
-
-    check = ReadinessCheck(
-        user_id=user_id, from_level=from_level, target_level=target_level, result=result, summary=summary
+    user_message = _add_message(
+        session,
+        chat,
+        ChatRole.USER,
+        level_test.answer_label(step, choice) if choice else text,
+        {"test": {"test_id": str(test.id), "step": step, "choice": choice}},
     )
-    session.add(check)
-    message = await _post_assistant_message(session, chat, summary)
-    return ReadinessOutcome(message, state, check)
+    await session.commit()
+
+    if choice is None:
+        question = await _post_test_question(session, chat, test, step=step, prefix=level_test.INVALID_ANSWER)
+        return ChatTurn([user_message, question], state)
+
+    if step < level_test.ENERGY_STEP:
+        # Reassign instead of appending: in-place changes of a JSONB list are not tracked.
+        test.answers = [*test.answers, {"choice": choice, "score": level_test.score(step, choice)}]
+        question = await _post_test_question(session, chat, test, step=step + 1)
+        return ChatTurn([user_message, question], state)
+
+    # The mental fuel scale is the last step: the test is complete.
+    level = level_test.level_from_scores([answer["score"] for answer in test.answers])
+    now = utcnow()
+    test.level, test.energy_level, test.completed_at = level, choice, now
+    state.level, state.energy_level, state.diagnostic_completed_at = level, choice, now
+    session.add(
+        UserStatusLog(
+            user_id=test.user_id,
+            level=level,
+            energy_level=choice,
+            focus_level=state.focus_level,
+            summary="Level test",
+            raw={"test_id": str(test.id), "answers": test.answers},
+        )
+    )
+    # Commit the result before the LLM call: the explanation is optional, the level is not.
+    await session.commit()
+
+    explanation = await agent.explain_test_result(
+        level_rank=LEVEL_RANK[level],
+        level_title=LEVEL_TITLES[level],
+        energy_level=choice,
+        answers=level_test.describe_answers(test.answers),
+    )
+    result = _add_message(
+        session,
+        chat,
+        ChatRole.ASSISTANT,
+        level_test.result_text(level, choice, explanation),
+        {"used_fallback": explanation is None, "sources": []},
+    )
+    await session.commit()
+    return ChatTurn([user_message, result], state)
+
+
+async def _post_test_question(
+    session: AsyncSession, chat: ChatSession, test: LevelTest, *, step: int, prefix: str | None = None
+) -> ChatMessage:
+    text = level_test.question_text(step)
+    message = _add_message(
+        session,
+        chat,
+        ChatRole.ASSISTANT,
+        f"{prefix}\n\n{text}" if prefix else text,
+        {
+            "used_fallback": False,
+            "sources": [],
+            "test": {
+                "test_id": str(test.id),
+                "step": step,
+                "total": level_test.TOTAL_STEPS,
+                "kind": "scale" if level_test.is_scale(step) else "choice",
+                "choices": level_test.choices(step),
+            },
+        },
+    )
+    await session.commit()
+    return message
 
 
 # --- helpers -----------------------------------------------------------------
@@ -317,16 +365,11 @@ def build_user_context(state: UserState, exercises: Sequence[UserExercise]) -> s
 def _apply_diagnostic(
     session: AsyncSession, user_id: uuid.UUID, state: UserState, update: DiagnosticUpdate | None
 ) -> None:
+    # The level is not here on purpose: only the level test sets it.
     if update is None:
         return
 
     changed = False
-    # Guardrail: the chat may only set the initial level; later changes go through a readiness check.
-    if update.level not in (None, UserLevel.UNKNOWN) and state.level == UserLevel.UNKNOWN:
-        state.level = update.level
-        state.diagnostic_completed_at = utcnow()
-        changed = True
-
     for field_name, value in (
         ("energy_level", _scale(update.energy_level)),
         ("focus_level", _scale(update.focus_level)),
@@ -404,24 +447,12 @@ async def _get_or_create_chat_session(session: AsyncSession, user_id: uuid.UUID)
     return chat
 
 
-async def _post_assistant_message(
-    session: AsyncSession,
-    chat: ChatSession,
-    content: str,
-    *,
-    used_fallback: bool = False,
-    sources: list[dict] | None = None,
+def _add_message(
+    session: AsyncSession, chat: ChatSession, role: ChatRole, content: str, meta: dict[str, Any] | None = None
 ) -> ChatMessage:
-    message = ChatMessage(
-        session_id=chat.id,
-        user_id=chat.user_id,
-        role=ChatRole.ASSISTANT,
-        content=content,
-        meta={"used_fallback": used_fallback, "sources": sources or []},
-    )
+    message = ChatMessage(session_id=chat.id, user_id=chat.user_id, role=role, content=content, meta=meta)
     session.add(message)
     chat.updated_at = utcnow()
-    await session.commit()
     return message
 
 

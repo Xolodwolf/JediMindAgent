@@ -12,9 +12,8 @@ from jedi_mind_agent.api.v1.schemas import (
     ChatTurnOut,
     ExerciseOut,
     ExercisePatchIn,
+    LevelTestStartIn,
     MessageOut,
-    ReadinessCheckOut,
-    ReadinessOut,
     StateOut,
     StateResponse,
 )
@@ -29,9 +28,7 @@ Agent = Annotated[JediAgent, Depends(get_agent)]
 
 @router.get("/me/state", response_model=StateResponse)
 async def get_state(session: SessionDep, user: CurrentUser) -> StateResponse:
-    state = await service.get_state(session, user.id)
-    check = await service.last_readiness_check(session, user.id)
-    return StateResponse(state=StateOut.from_model(state), last_check=ReadinessCheckOut.from_model(check))
+    return StateResponse(state=StateOut.from_model(await service.get_state(session, user.id)))
 
 
 @router.get("/me/messages", response_model=list[MessageOut])
@@ -39,20 +36,14 @@ async def list_messages(session: SessionDep, user: CurrentUser) -> list[MessageO
     return [MessageOut.from_model(message) for message in await service.list_user_messages(session, user.id)]
 
 
-@router.post("/me/readiness", response_model=ReadinessOut)
-async def check_readiness(session: SessionDep, user: CurrentUser, agent: Agent) -> ReadinessOut:
-    outcome = await service.run_readiness_check(session, user_id=user.id, agent=agent)
-    return ReadinessOut(
-        message=MessageOut.from_model(outcome.message),
-        state=StateOut.from_model(outcome.state),
-        check=ReadinessCheckOut.from_model(outcome.check),
-    )
+@router.post("/me/level-test", response_model=ChatTurnOut)
+async def start_level_test(body: LevelTestStartIn, session: SessionDep, user: CurrentUser) -> ChatTurnOut:
+    return _turn_out(await service.start_level_test(session, user_id=user.id, restart=body.restart))
 
 
 @router.post("/me/reset", response_model=StateResponse)
 async def reset_memory(session: SessionDep, user: CurrentUser) -> StateResponse:
-    state = await service.reset_user(session, user.id)
-    return StateResponse(state=StateOut.from_model(state), last_check=None)
+    return StateResponse(state=StateOut.from_model(await service.reset_user(session, user.id)))
 
 
 @router.post("/chat/messages", response_model=ChatTurnOut)
@@ -64,12 +55,7 @@ async def send_message(body: ChatMessageIn, session: SessionDep, user: CurrentUs
         agent=agent,
         retrieve=_retrieve if body.use_rag else None,
     )
-    return ChatTurnOut(
-        user_message=MessageOut.from_model(turn.user_message),
-        assistant_message=MessageOut.from_model(turn.assistant_message),
-        state=StateOut.from_model(turn.state),
-        exercises_changed=[ExerciseOut.from_model(exercise) for exercise in turn.new_exercises],
-    )
+    return _turn_out(turn)
 
 
 @router.get("/exercises", response_model=list[ExerciseOut])
@@ -99,6 +85,14 @@ async def delete_exercise(exercise_id: uuid.UUID, session: SessionDep, user: Cur
     except service.NotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return Response(status_code=204)
+
+
+def _turn_out(turn: service.ChatTurn) -> ChatTurnOut:
+    return ChatTurnOut(
+        messages=[MessageOut.from_model(message) for message in turn.messages],
+        state=StateOut.from_model(turn.state),
+        exercises_changed=[ExerciseOut.from_model(exercise) for exercise in turn.new_exercises],
+    )
 
 
 def _retrieve(query: str) -> list[RetrievalResult]:

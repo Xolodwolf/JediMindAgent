@@ -1,35 +1,23 @@
-import { formatDate, h } from "./dom.js";
+import { h } from "./dom.js";
 
-const READINESS_LABELS = {
-  ready: "готов",
-  partially_ready: "частично готов",
-  not_ready: "пока не готов",
-};
-
-export function renderState(root, { state, lastCheck, busy, onReadiness }) {
+export function renderState(root, { state, busy, onRetest }) {
   if (!state) {
     root.replaceChildren(h("p", { class: "muted" }, "Загрузка…"));
     return;
   }
 
-  const level = state.level_rank ? `${state.level_rank} · ${state.level_title}` : state.level_title;
+  const known = state.level_rank > 0;
   const nodes = [
-    stat("Уровень", h("div", { class: "stat-value" }, level)),
+    stat("Уровень", h("div", { class: "stat-value" }, known ? `${state.level_rank} · ${state.level_title}` : state.level_title)),
     scaleStat("Мыслетопливо", state.energy_level),
     scaleStat("Фокус", state.focus_level),
     state.main_problem && stat("Главная проблема", h("div", {}, state.main_problem)),
     state.time_limit_minutes && stat("Время на практику", h("div", {}, `${state.time_limit_minutes} мин в день`)),
     h(
       "div",
-      { class: "readiness" },
-      h("button", { type: "button", disabled: busy, onclick: onReadiness }, "Проверить готовность"),
-      lastCheck &&
-        h(
-          "p",
-          { class: "muted" },
-          `Последняя проверка ${formatDate(lastCheck.created_at)}: `,
-          h("strong", { class: `result-${lastCheck.result}` }, READINESS_LABELS[lastCheck.result] ?? lastCheck.result),
-        ),
+      { class: "retest" },
+      h("button", { type: "button", disabled: busy, onclick: onRetest }, known ? "Пройти тест заново" : "Начать тест заново"),
+      h("p", { class: "muted" }, "Уровень определяется тестом в чате."),
     ),
   ];
   root.replaceChildren(...nodes.filter(Boolean));

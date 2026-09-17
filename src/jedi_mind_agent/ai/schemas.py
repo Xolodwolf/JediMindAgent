@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from jedi_mind_agent.product.enums import ReadinessResult, UserLevel
+from jedi_mind_agent.product.enums import UserLevel
 from jedi_mind_agent.rag.schemas import RagUsage
 
 
@@ -22,7 +22,7 @@ class ChatResponse(BaseModel):
 
 
 class DiagnosticUpdate(BaseModel):
-    level: UserLevel | None = Field(default=None, description="Уровень пользователя — только при достаточных основаниях.")
+    # No level field: the level is set only by the level test.
     energy_level: int | None = Field(default=None, description="Мыслетопливо, от 1 до 10.")
     focus_level: int | None = Field(default=None, description="Способность сосредоточиться, от 1 до 10.")
     main_problem: str | None = Field(default=None, description="Главная проблема пользователя, одно короткое предложение.")
@@ -40,8 +40,3 @@ class AgentReply(BaseModel):
     answer: str = Field(description="Сообщение, которое увидит пользователь.")
     diagnostic: DiagnosticUpdate | None = Field(default=None, description="Новые сведения о состоянии пользователя.")
     exercise: ExerciseProposal | None = Field(default=None, description="Одно упражнение, если его уместно предложить.")
-
-
-class ReadinessAssessment(BaseModel):
-    result: ReadinessResult
-    summary: str = Field(description="2–4 предложения для пользователя: результат и что делать дальше.")

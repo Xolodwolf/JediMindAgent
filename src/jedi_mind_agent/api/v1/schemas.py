@@ -2,20 +2,12 @@
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, StringConstraints
 
-from jedi_mind_agent.product.enums import (
-    EXERCISE_TRANSITIONS,
-    LEVEL_RANK,
-    LEVEL_TITLES,
-    ChatRole,
-    ExerciseStatus,
-    ReadinessResult,
-    UserLevel,
-)
-from jedi_mind_agent.product.models import ChatMessage, ReadinessCheck, UserExercise, UserState
+from jedi_mind_agent.product.enums import EXERCISE_TRANSITIONS, LEVEL_RANK, LEVEL_TITLES, ChatRole, ExerciseStatus, UserLevel
+from jedi_mind_agent.product.models import ChatMessage, UserExercise, UserState
 
 
 class StateOut(BaseModel):
@@ -40,35 +32,24 @@ class StateOut(BaseModel):
         )
 
 
-class ReadinessCheckOut(BaseModel):
-    result: ReadinessResult
-    summary: str
-    from_level: UserLevel
-    target_level: UserLevel | None
-    created_at: datetime
-
-    @classmethod
-    def from_model(cls, check: ReadinessCheck | None) -> "ReadinessCheckOut | None":
-        if check is None:
-            return None
-        return cls(
-            result=check.result,
-            summary=check.summary,
-            from_level=check.from_level,
-            target_level=check.target_level,
-            created_at=check.created_at,
-        )
-
-
 class StateResponse(BaseModel):
     state: StateOut
-    last_check: ReadinessCheckOut | None
 
 
 class SourceOut(BaseModel):
     source_title: str
     page_start: int
     page_end: int
+
+
+class TestPromptOut(BaseModel):
+    """A level test question: the UI renders its choices as buttons under the latest message."""
+
+    test_id: uuid.UUID
+    step: int
+    total: int
+    kind: Literal["choice", "scale"]
+    choices: list[str]
 
 
 class MessageOut(BaseModel):
@@ -78,10 +59,12 @@ class MessageOut(BaseModel):
     created_at: datetime
     used_fallback: bool
     sources: list[SourceOut]
+    test: TestPromptOut | None
 
     @classmethod
     def from_model(cls, message: ChatMessage) -> "MessageOut":
         meta = message.meta or {}
+        test = meta.get("test")
         return cls(
             id=message.id,
             role=message.role,
@@ -89,6 +72,8 @@ class MessageOut(BaseModel):
             created_at=message.created_at,
             used_fallback=bool(meta.get("used_fallback")),
             sources=[SourceOut.model_validate(source) for source in meta.get("sources", [])],
+            # Only questions carry choices; answers are marked as test messages without them.
+            test=TestPromptOut.model_validate(test) if test and "choices" in test else None,
         )
 
 
@@ -124,18 +109,17 @@ class ChatMessageIn(BaseModel):
     use_rag: bool = True
 
 
+class LevelTestStartIn(BaseModel):
+    # False resumes an unfinished test instead of starting over.
+    restart: bool = False
+
+
 class ChatTurnOut(BaseModel):
-    user_message: MessageOut
-    assistant_message: MessageOut
+    # New messages in chronological order: the user's message (if any) and the replies.
+    messages: list[MessageOut]
     state: StateOut
     exercises_changed: list[ExerciseOut]
 
 
 class ExercisePatchIn(BaseModel):
     status: ExerciseStatus
-
-
-class ReadinessOut(BaseModel):
-    message: MessageOut
-    state: StateOut
-    check: ReadinessCheckOut | None
