@@ -41,7 +41,7 @@ class ChromaRagStore:
                 "embedding_model": embedding_model,
                 "embedding_dimensions": embedding_dimensions,
                 "is_exercise": False,
-                "level": "",
+                "level": chunk.level,
             }
             for chunk in chunks
         ]
@@ -62,8 +62,15 @@ class ChromaRagStore:
         query_embedding: list[float],
         top_k: int,
         source_slug: str | None = None,
+        max_level: int | None = None,
     ) -> list[RetrievalResult]:
-        where = {"source_slug": source_slug} if source_slug else None
+        clauses: list[dict] = []
+        if source_slug:
+            clauses.append({"source_slug": source_slug})
+        if max_level is not None:
+            clauses.append({"level": {"$lte": max_level}})
+        where = None if not clauses else clauses[0] if len(clauses) == 1 else {"$and": clauses}
+
         response = self._collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
@@ -90,6 +97,7 @@ class ChromaRagStore:
                     source_filename=str(metadata.get("source_filename", "")),
                     page_start=int(metadata.get("page_start", 0)),
                     page_end=int(metadata.get("page_end", 0)),
+                    level=int(metadata.get("level") or 0),
                 )
             )
 

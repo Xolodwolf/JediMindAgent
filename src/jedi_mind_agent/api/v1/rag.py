@@ -25,4 +25,5 @@ def _retrieve(request: RetrieveRequest) -> list[RetrievalResult]:
         request.query,
         top_k=request.top_k,
         source_slug=request.source_slug,
+        max_level=request.max_level,
     )

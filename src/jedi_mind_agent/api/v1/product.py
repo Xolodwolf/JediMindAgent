@@ -95,5 +95,5 @@ def _turn_out(turn: service.ChatTurn) -> ChatTurnOut:
     )
 
 
-def _retrieve(query: str) -> list[RetrievalResult]:
-    return get_retrieval_service().retrieve(query)
+def _retrieve(query: str, max_level: int) -> list[RetrievalResult]:
+    return get_retrieval_service().retrieve(query, max_level=max_level)

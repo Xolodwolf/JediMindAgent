@@ -17,12 +17,14 @@ class RagRetrievalService:
         *,
         top_k: int | None = None,
         source_slug: str | None = None,
+        max_level: int | None = None,
     ) -> list[RetrievalResult]:
         [query_embedding] = self._embeddings.embed([query])
         return self._store.query(
             query_embedding=query_embedding,
             top_k=top_k or RAG_TOP_K,
             source_slug=source_slug,
+            max_level=max_level,
         )
 
 
