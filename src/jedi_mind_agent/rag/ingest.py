@@ -1,11 +1,13 @@
 import argparse
 import re
+from collections import Counter
 from pathlib import Path
 
 from jedi_mind_agent.rag.chroma import ChromaRagStore
 from jedi_mind_agent.rag.chunking import chunk_pages, content_hash
 from jedi_mind_agent.rag.config import CHROMA_COLLECTION, EMBEDDING_DIMENSIONS, EMBEDDING_MODEL
 from jedi_mind_agent.rag.embeddings import LocalEmbeddingService
+from jedi_mind_agent.rag.levels import assign_levels
 from jedi_mind_agent.rag.pdf import extract_pdf_pages
 from jedi_mind_agent.rag.schemas import IngestionSummary
 
@@ -27,7 +29,7 @@ def ingest_pdf(
     file_hash = content_hash(path.read_bytes())
 
     pages = extract_pdf_pages(path)
-    chunks = chunk_pages(pages)
+    chunks = assign_levels(chunk_pages(pages))
     if not chunks:
         raise ValueError(f"No text chunks extracted from PDF: {path}")
 
@@ -53,6 +55,7 @@ def ingest_pdf(
         file_hash=file_hash,
         page_count=len(pages),
         chunk_count=len(chunks),
+        chunks_by_level=dict(sorted(Counter(chunk.level for chunk in chunks).items())),
         collection=CHROMA_COLLECTION,
         embedding_model=EMBEDDING_MODEL,
     )

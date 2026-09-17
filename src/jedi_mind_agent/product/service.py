@@ -44,7 +44,8 @@ MAX_NEW_EXERCISES = 3
 # Everything a reset deletes. Chat messages come before chat sessions because they reference them.
 USER_DATA_MODELS = (ChatMessage, ChatSession, UserExercise, LevelTest, UserStatusLog)
 
-Retriever = Callable[[str], list[RetrievalResult]]
+# (query, max_level) -> book chunks with level <= max_level
+Retriever = Callable[[str, int], list[RetrievalResult]]
 
 
 class DomainError(Exception):
@@ -220,7 +221,8 @@ async def handle_chat_message(
 
     exercises = await list_exercises(session, user_id)
     history = await list_messages(session, chat.id, limit=HISTORY_LIMIT, exclude_test=True)
-    rag_results = await _retrieve(retrieve, text) if retrieve else []
+    # The level is the ceiling of practices, so book sections above it never reach the agent's context.
+    rag_results = await _retrieve(retrieve, text, LEVEL_RANK[state.level]) if retrieve else []
 
     reply, used_fallback = await agent.reply(
         user_context=build_user_context(state, exercises),
@@ -456,9 +458,9 @@ def _add_message(
     return message
 
 
-async def _retrieve(retrieve: Retriever, query: str) -> list[RetrievalResult]:
+async def _retrieve(retrieve: Retriever, query: str, max_level: int) -> list[RetrievalResult]:
     try:
-        return await run_in_threadpool(retrieve, query)
+        return await run_in_threadpool(retrieve, query, max_level)
     except Exception:
         logger.exception("RAG retrieval failed; answering without book context")
         return []
