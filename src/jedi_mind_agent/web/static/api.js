@@ -38,6 +38,6 @@ export const api = {
   sendMessage: (message, useRag) => request("POST", "/api/v1/chat/messages", { message, use_rag: useRag }),
   setExerciseStatus: (id, status) => request("PATCH", `/api/v1/exercises/${encodeURIComponent(id)}`, { status }),
   deleteExercise: (id) => request("DELETE", `/api/v1/exercises/${encodeURIComponent(id)}`),
-  checkReadiness: () => request("POST", "/api/v1/me/readiness"),
+  startLevelTest: (restart) => request("POST", "/api/v1/me/level-test", { restart }),
   reset: () => request("POST", "/api/v1/me/reset"),
 };

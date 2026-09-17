@@ -18,7 +18,7 @@ export function renderExercises(root, props) {
     return;
   }
   if (!exercises.length) {
-    root.replaceChildren(h("p", { class: "muted" }, "Пока нет упражнений. Агент предложит их после диагностики."));
+    root.replaceChildren(h("p", { class: "muted" }, "Пока нет упражнений. Агент предложит их после теста."));
     return;
   }
 

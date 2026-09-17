@@ -1,8 +1,8 @@
 import { api } from "./api.js";
 import { renderChat } from "./views/chat.js";
+import { toggleInSet } from "./views/dom.js";
 import { renderExercises } from "./views/exercises.js";
 import { renderState } from "./views/state.js";
-import { toggleInSet } from "./views/dom.js";
 
 const RAG_STORAGE_KEY = "jediMindAgent.useRag";
 
@@ -22,11 +22,10 @@ const els = {
 
 const store = {
   state: null,
-  lastCheck: null,
   messages: [],
   exercises: null,
   pending: null, // text of the message being sent
-  busy: false, // a chat or readiness request is in flight
+  busy: false, // a chat or test request is in flight
   loadError: null,
   busyExercises: new Set(),
   openExercises: new Set(),
@@ -40,9 +39,8 @@ let chatSignature = "";
 function render() {
   renderState(els.stateBody, {
     state: store.state,
-    lastCheck: store.lastCheck,
     busy: store.busy,
-    onReadiness: checkReadiness,
+    onRetest: () => startLevelTest(true),
   });
   renderChat(els.messages, {
     messages: store.messages,
@@ -50,6 +48,7 @@ function render() {
     thinking: store.busy,
     loadError: store.loadError,
     onRetry: load,
+    onAnswer: (choice) => sendMessage(String(choice)),
     openSources: store.openSources,
   });
   // Scroll to the newest message only when the conversation changed, not when a panel is toggled.
@@ -83,34 +82,38 @@ async function load() {
       api.getExercises(),
     ]);
     store.state = stateResponse.state;
-    store.lastCheck = stateResponse.last_check;
     store.messages = messages;
     store.exercises = exercises;
   } catch (error) {
     store.loadError = error.message;
     showToast(error.message, "error");
+    render();
+    return;
   }
   render();
+  // Until the level is known the conversation is the level test; an unfinished test is resumed, not restarted.
+  if (store.state.level === "unknown") await startLevelTest(false);
 }
 
-async function sendMessage() {
-  const text = els.input.value.trim();
+// `answer` is set when a test choice button is clicked; otherwise the text comes from the input.
+async function sendMessage(answer) {
+  const text = (answer ?? els.input.value).trim();
   if (!text || store.busy) return;
 
-  els.input.value = "";
-  autosize();
+  if (answer === undefined) {
+    els.input.value = "";
+    autosize();
+  }
   store.pending = text;
   store.busy = true;
   render();
 
   try {
     const turn = await api.sendMessage(text, els.useRag.checked);
-    store.messages.push(turn.user_message, turn.assistant_message);
-    store.state = turn.state;
-    mergeExercises(turn.exercises_changed);
+    applyTurn(turn);
   } catch (error) {
     showToast(error.message, "error");
-    if (!els.input.value) els.input.value = text;
+    if (answer === undefined && !els.input.value) els.input.value = text;
     // The server saves the user's message before calling the agent, so resync the history.
     await api.getMessages().then((messages) => (store.messages = messages)).catch(() => {});
   } finally {
@@ -122,21 +125,25 @@ async function sendMessage() {
   }
 }
 
-async function checkReadiness() {
+async function startLevelTest(restart) {
   if (store.busy) return;
   store.busy = true;
   render();
   try {
-    const outcome = await api.checkReadiness();
-    store.messages.push(outcome.message);
-    store.state = outcome.state;
-    if (outcome.check) store.lastCheck = outcome.check;
+    applyTurn(await api.startLevelTest(restart));
   } catch (error) {
     showToast(error.message, "error");
   } finally {
     store.busy = false;
     render();
+    els.input.focus();
   }
+}
+
+function applyTurn(turn) {
+  store.messages.push(...turn.messages);
+  store.state = turn.state;
+  mergeExercises(turn.exercises_changed);
 }
 
 async function changeExerciseStatus(id, status) {
@@ -189,21 +196,23 @@ async function deleteExercise(id) {
 async function resetMemory() {
   store.busy = true;
   render();
+  let done = false;
   try {
     const response = await api.reset();
     store.state = response.state;
-    store.lastCheck = response.last_check;
     store.messages = [];
     store.exercises = [];
     store.openExercises.clear();
     store.openSources.clear();
-    showToast("Память очищена. Можно начинать сначала.", "info");
+    done = true;
+    showToast("Память очищена. Начнём с теста.", "info");
   } catch (error) {
     showToast(error.message, "error");
   } finally {
     store.busy = false;
     render();
   }
+  if (done) await startLevelTest(false);
 }
 
 function mergeExercises(changed) {

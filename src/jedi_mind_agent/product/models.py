@@ -8,7 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from jedi_mind_agent.db.base import Base
-from jedi_mind_agent.product.enums import ChatRole, ExerciseStatus, ReadinessResult, UserLevel
+from jedi_mind_agent.product.enums import ChatRole, ExerciseStatus, UserLevel
 
 
 def utcnow() -> datetime:
@@ -22,7 +22,6 @@ def _pg_enum(enum_cls: type[StrEnum], name: str) -> Enum:
 USER_LEVEL = _pg_enum(UserLevel, "user_level")
 EXERCISE_STATUS = _pg_enum(ExerciseStatus, "exercise_status")
 CHAT_ROLE = _pg_enum(ChatRole, "chat_role")
-READINESS_RESULT = _pg_enum(ReadinessResult, "readiness_result")
 
 
 class UuidPk:
@@ -111,12 +110,18 @@ class UserExercise(UuidPk, Timestamps, Base):
     sources: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
 
 
-class ReadinessCheck(UuidPk, CreatedAt, Base):
-    __tablename__ = "readiness_checks"
-    __table_args__ = (Index("ix_readiness_checks_user_created_at", "user_id", "created_at"),)
+class LevelTest(UuidPk, CreatedAt, Base):
+    """One attempt of the level test. An attempt without completed_at is the test currently running in the chat."""
+
+    __tablename__ = "level_tests"
+    __table_args__ = (
+        Index("ix_level_tests_user_created_at", "user_id", "created_at"),
+        CheckConstraint("energy_level between 1 and 10", name="ck_level_tests_energy_level"),
+    )
 
     user_id: Mapped[uuid.UUID] = _user_fk()
-    from_level: Mapped[UserLevel] = mapped_column(USER_LEVEL)
-    target_level: Mapped[UserLevel | None] = mapped_column(USER_LEVEL)
-    result: Mapped[ReadinessResult] = mapped_column(READINESS_RESULT)
-    summary: Mapped[str] = mapped_column(Text)
+    # [{"choice": displayed option number, "score": level of that option}, ...]; the next question is len(answers).
+    answers: Mapped[list[dict[str, int]]] = mapped_column(JSONB, default=list)
+    level: Mapped[UserLevel | None] = mapped_column(USER_LEVEL)
+    energy_level: Mapped[int | None] = mapped_column(SmallInteger)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

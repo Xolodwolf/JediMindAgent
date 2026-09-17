@@ -23,12 +23,6 @@ class ChatRole(StrEnum):
     TOOL = "tool"
 
 
-class ReadinessResult(StrEnum):
-    READY = "ready"
-    PARTIALLY_READY = "partially_ready"
-    NOT_READY = "not_ready"
-
-
 # Exercises are not performed, only evaluated — the book's "keep / discard". The evaluation can be changed later.
 EXERCISE_TRANSITIONS: dict[ExerciseStatus, tuple[ExerciseStatus, ...]] = {
     ExerciseStatus.SUGGESTED: (ExerciseStatus.SUITABLE, ExerciseStatus.NOT_SUITABLE),
@@ -45,6 +39,8 @@ LEVEL_RANK: dict[UserLevel, int] = {
     UserLevel.LEVEL_5: 5,
 }
 
+LEVEL_BY_RANK: dict[int, UserLevel] = {rank: level for level, rank in LEVEL_RANK.items()}
+
 # Approved level names, see docs/levels.md.
 LEVEL_TITLES: dict[UserLevel, str] = {
     UserLevel.UNKNOWN: "не определён",
@@ -53,11 +49,4 @@ LEVEL_TITLES: dict[UserLevel, str] = {
     UserLevel.LEVEL_3: "Есть свет в конце тоннеля",
     UserLevel.LEVEL_4: "Планомерно к намеченным целям",
     UserLevel.LEVEL_5: "Естественно, спонтанно и все во благо",
-}
-
-NEXT_LEVEL: dict[UserLevel, UserLevel] = {
-    UserLevel.LEVEL_1: UserLevel.LEVEL_2,
-    UserLevel.LEVEL_2: UserLevel.LEVEL_3,
-    UserLevel.LEVEL_3: UserLevel.LEVEL_4,
-    UserLevel.LEVEL_4: UserLevel.LEVEL_5,
 }
