@@ -1,0 +1,66 @@
+{% load static %}<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JediMindAgent</title>
+  <link rel="stylesheet" href="{% static 'app.css' %}">
+  <script type="module" src="{% static 'app.js' %}"></script>
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">JediMindAgent</span>
+    <div class="topbar-actions">
+      <span class="muted">{{ user.get_username }}</span>
+      {% if user.is_staff %}<a href="{% url 'admin:index' %}">Админка</a>{% endif %}
+      <button id="reset-button" type="button">Начать сначала</button>
+      <form method="post" action="{% url 'logout' %}">
+        {% csrf_token %}
+        <button type="submit">Выйти</button>
+      </form>
+    </div>
+  </header>
+
+  <noscript><div class="noscript">Для работы интерфейса нужен JavaScript.</div></noscript>
+
+  <main class="layout">
+    <aside class="panel" aria-labelledby="state-title">
+      <h2 id="state-title">Состояние</h2>
+      <div id="state-body"><p class="muted">Загрузка…</p></div>
+    </aside>
+
+    <section class="panel chat" aria-label="Чат">
+      <div class="chat-log" id="chat-log">
+        <div class="chat-log-inner" id="chat-messages" aria-live="polite"></div>
+      </div>
+      <form class="composer" id="composer">
+        <textarea id="message" rows="1" maxlength="4000" aria-label="Сообщение агенту"
+                  placeholder="Сообщение агенту… Enter — отправить, Shift+Enter — новая строка"></textarea>
+        <label class="rag-toggle">
+          <input type="checkbox" id="use-rag" checked>
+          искать в книге
+        </label>
+        <button class="primary" type="submit" id="send-button">Отправить</button>
+      </form>
+    </section>
+
+    <aside class="panel" aria-labelledby="exercises-title">
+      <h2 id="exercises-title">Упражнения</h2>
+      <div id="exercises-body"><p class="muted">Загрузка…</p></div>
+    </aside>
+  </main>
+
+  <dialog id="reset-dialog" aria-labelledby="reset-title">
+    <form method="dialog">
+      <h3 id="reset-title">Начать сначала?</h3>
+      <p>Будут удалены история чата, упражнения, результаты теста и состояние. Отменить это нельзя.</p>
+      <div class="dialog-actions">
+        <button type="submit" value="cancel" autofocus>Отмена</button>
+        <button type="submit" value="confirm" class="danger">Удалить всё</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

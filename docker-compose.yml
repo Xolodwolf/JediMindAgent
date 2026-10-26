@@ -1,16 +1,31 @@
+x-database-url: &database-url postgresql://postgres:postgres@db:5432/jedi_mind_agent
+
 services:
-  app:
+  web:
     build: .
-    command: sh -c "alembic upgrade head && uvicorn jedi_mind_agent.main:app --host 0.0.0.0 --port 8000 --reload"
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/jedi_mind_agent
+      DATABASE_URL: *database-url
     ports:
       - "8000:8000"
     volumes:
-      - .:/app
-      - model_cache:/root/.cache
+      - media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      rag:
+        condition: service_started
+
+  rag:
+    build:
+      context: .
+      dockerfile: Dockerfile.rag
+    environment:
+      DATABASE_URL: *database-url
+    volumes:
+      - media:/app/media
+      - model_cache:/home/app/.cache
     depends_on:
       db:
         condition: service_healthy
@@ -43,5 +58,6 @@ services:
 
 volumes:
   chroma_data:
+  media:
   model_cache:
   postgres_data:

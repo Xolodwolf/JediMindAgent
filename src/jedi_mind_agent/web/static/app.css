@@ -90,6 +90,31 @@ textarea {
   background: var(--surface);
 }
 .brand { margin-right: auto; font-weight: 650; }
+.topbar-actions { display: flex; align-items: center; gap: 12px; }
+.topbar-actions form { margin: 0; }
+a { color: var(--accent); }
+
+/* login and registration */
+
+body.auth-page { align-items: center; justify-content: center; padding: 16px; }
+.auth-card {
+  width: min(380px, 100%);
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.auth-card h1 { margin: 12px 0 16px; font-size: 20px; }
+.auth-form { display: flex; flex-direction: column; gap: 10px; }
+.auth-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.auth-form input {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.auth-form .errorlist { margin: 0; padding: 0; list-style: none; color: var(--danger-text); font-size: 13px; }
+.auth-form .help ul { margin: 0; padding-left: 18px; }
 
 .noscript { margin: 12px 20px 0; padding: 8px 12px; border-radius: 8px; background: var(--danger-bg); color: var(--danger-text); }
 

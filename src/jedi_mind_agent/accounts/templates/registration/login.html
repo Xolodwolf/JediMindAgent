@@ -1,0 +1,16 @@
+{% extends "registration/base.html" %}
+{% block title %}Вход — JediMindAgent{% endblock %}
+{% block content %}
+  <h1>Вход</h1>
+  <form method="post" class="auth-form">
+    {% csrf_token %}
+    {{ form.non_field_errors }}
+    {% for field in form %}
+      <label>{{ field.label }}{{ field }}</label>
+      {{ field.errors }}
+    {% endfor %}
+    <input type="hidden" name="next" value="{{ next }}">
+    <button class="primary" type="submit">Войти</button>
+  </form>
+  <p class="muted">Нет аккаунта? <a href="{% url 'register' %}">Зарегистрироваться</a></p>
+{% endblock %}

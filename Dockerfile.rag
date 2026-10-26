@@ -1,0 +1,29 @@
+# RAG service: FastAPI + sentence-transformers + the book worker. All heavy ML dependencies live here.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    HF_HOME=/home/app/.cache/huggingface \
+    MEDIA_ROOT=/app/media
+
+WORKDIR /app
+
+RUN useradd --uid 1000 --create-home app \
+    && mkdir -p /app/media /home/app/.cache \
+    && chown app /app/media /home/app/.cache
+
+# CPU-only torch: the default wheel pulls several GB of CUDA libraries.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.7.1
+
+COPY requirements-rag.txt ./
+RUN pip install --no-cache-dir -r requirements-rag.txt
+
+COPY src/rag_service ./src/rag_service
+COPY tests/__init__.py ./tests/__init__.py
+COPY tests/rag_service ./tests/rag_service
+
+USER app
+EXPOSE 8001
+
+CMD ["uvicorn", "rag_service.main:app", "--host", "0.0.0.0", "--port", "8001"]

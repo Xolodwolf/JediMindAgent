@@ -5,18 +5,33 @@ export class ApiError extends Error {
   }
 }
 
+// Django protects unsafe methods with CSRF: the token comes from the cookie set by the page.
+function csrfToken() {
+  const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
 async function request(method, path, body) {
+  const headers = { "X-CSRFToken": csrfToken() };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+
   let response;
   try {
     response = await fetch(path, {
       method,
-      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      headers,
+      credentials: "same-origin",
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
     throw new ApiError("Сервер недоступен. Проверьте, что приложение запущено.", 0);
   }
 
+  if (response.status === 401) {
+    // The session expired: go to the login page and come back here afterwards.
+    window.location.assign(`/accounts/login/?next=${encodeURIComponent(window.location.pathname)}`);
+    throw new ApiError("Требуется вход.", 401);
+  }
   const data = await response.json().catch(() => null);
   if (!response.ok) {
     throw new ApiError(errorMessage(data, response.status), response.status);

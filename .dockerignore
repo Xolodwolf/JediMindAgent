@@ -9,3 +9,7 @@ __pycache__
 postgres_data
 docs/_build
 data/sources
+media
+staticfiles
+db.sqlite3
+img

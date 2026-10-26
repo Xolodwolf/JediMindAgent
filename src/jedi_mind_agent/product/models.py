@@ -1,127 +1,136 @@
 import uuid
-from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Index, SmallInteger, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from django.conf import settings
+from django.db import models
 
-from jedi_mind_agent.db.base import Base
 from jedi_mind_agent.product.enums import ChatRole, ExerciseStatus, UserLevel
 
 
-def utcnow() -> datetime:
-    return datetime.now(UTC)
+def _choices(enum_cls: type[StrEnum]) -> list[tuple[str, str]]:
+    return [(member.value, member.value) for member in enum_cls]
 
 
-def _pg_enum(enum_cls: type[StrEnum], name: str) -> Enum:
-    return Enum(enum_cls, name=name, values_callable=lambda members: [member.value for member in members])
+USER_LEVEL_CHOICES = _choices(UserLevel)
 
 
-USER_LEVEL = _pg_enum(UserLevel, "user_level")
-EXERCISE_STATUS = _pg_enum(ExerciseStatus, "exercise_status")
-CHAT_ROLE = _pg_enum(ChatRole, "chat_role")
+class UuidModel(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField("создано", auto_now_add=True)
+
+    class Meta:
+        abstract = True
 
 
-class UuidPk:
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-
-
-class CreatedAt:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class Timestamps(CreatedAt):
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
-
-
-def _user_fk() -> Mapped[uuid.UUID]:
-    return mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-
-
-class User(UuidPk, Timestamps, Base):
-    __tablename__ = "users"
-    __table_args__ = (UniqueConstraint("username", name="uq_users_username"),)
-
-    username: Mapped[str] = mapped_column(String(50))
-
-
-class UserState(UuidPk, Timestamps, Base):
-    __tablename__ = "user_states"
-    __table_args__ = (
-        UniqueConstraint("user_id", name="uq_user_states_user_id"),
-        CheckConstraint("energy_level between 1 and 10", name="ck_user_states_energy_level"),
-        CheckConstraint("focus_level between 1 and 10", name="ck_user_states_focus_level"),
+def _user_fk(related_name: str) -> models.ForeignKey:
+    return models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name=related_name, verbose_name="пользователь"
     )
 
-    user_id: Mapped[uuid.UUID] = _user_fk()
-    level: Mapped[UserLevel] = mapped_column(USER_LEVEL, default=UserLevel.UNKNOWN)
-    energy_level: Mapped[int | None] = mapped_column(SmallInteger)
-    focus_level: Mapped[int | None] = mapped_column(SmallInteger)
-    main_problem: Mapped[str | None] = mapped_column(Text)
-    time_limit_minutes: Mapped[int | None]
-    diagnostic_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+def _scale_check(model: str, field: str) -> models.CheckConstraint:
+    return models.CheckConstraint(
+        condition=models.Q(**{f"{field}__isnull": True}) | models.Q(**{f"{field}__gte": 1, f"{field}__lte": 10}),
+        name=f"ck_{model}_{field}",
+    )
 
 
-class UserStatusLog(UuidPk, CreatedAt, Base):
-    __tablename__ = "user_status_logs"
-    __table_args__ = (Index("ix_user_status_logs_user_created_at", "user_id", "created_at"),)
+class UserState(UuidModel):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="jedi_state", verbose_name="пользователь"
+    )
+    level = models.CharField("уровень", max_length=20, choices=USER_LEVEL_CHOICES, default=UserLevel.UNKNOWN)
+    energy_level = models.PositiveSmallIntegerField("мыслетопливо", null=True, blank=True)
+    focus_level = models.PositiveSmallIntegerField("фокус", null=True, blank=True)
+    main_problem = models.TextField("главная проблема", null=True, blank=True)
+    time_limit_minutes = models.PositiveIntegerField("минут в день на практики", null=True, blank=True)
+    diagnostic_completed_at = models.DateTimeField("тест пройден", null=True, blank=True)
+    updated_at = models.DateTimeField("изменено", auto_now=True)
 
-    user_id: Mapped[uuid.UUID] = _user_fk()
-    level: Mapped[UserLevel] = mapped_column(USER_LEVEL)
-    energy_level: Mapped[int | None] = mapped_column(SmallInteger)
-    focus_level: Mapped[int | None] = mapped_column(SmallInteger)
-    summary: Mapped[str | None] = mapped_column(Text)
-    raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    class Meta:
+        verbose_name = "состояние пользователя"
+        verbose_name_plural = "состояния пользователей"
+        constraints = [_scale_check("userstate", "energy_level"), _scale_check("userstate", "focus_level")]
 
-
-class ChatSession(UuidPk, Timestamps, Base):
-    __tablename__ = "chat_sessions"
-    __table_args__ = (Index("ix_chat_sessions_user_updated_at", "user_id", "updated_at"),)
-
-    user_id: Mapped[uuid.UUID] = _user_fk()
-    title: Mapped[str | None] = mapped_column(Text)
-
-
-class ChatMessage(UuidPk, CreatedAt, Base):
-    __tablename__ = "chat_messages"
-    __table_args__ = (Index("ix_chat_messages_session_created_at", "session_id", "created_at"),)
-
-    session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chat_sessions.id", ondelete="CASCADE"))
-    user_id: Mapped[uuid.UUID] = _user_fk()
-    role: Mapped[ChatRole] = mapped_column(CHAT_ROLE)
-    content: Mapped[str] = mapped_column(Text)
-    # "metadata" is reserved by the declarative API, so the attribute is named differently from the column.
-    meta: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB)
+    def __str__(self) -> str:
+        return f"{self.user} — {self.level}"
 
 
-class UserExercise(UuidPk, Timestamps, Base):
-    __tablename__ = "user_exercises"
-    __table_args__ = (Index("ix_user_exercises_user_status", "user_id", "status"),)
+class UserStatusLog(UuidModel):
+    user = _user_fk("jedi_status_logs")
+    level = models.CharField("уровень", max_length=20, choices=USER_LEVEL_CHOICES)
+    energy_level = models.PositiveSmallIntegerField("мыслетопливо", null=True, blank=True)
+    focus_level = models.PositiveSmallIntegerField("фокус", null=True, blank=True)
+    summary = models.TextField("событие", null=True, blank=True)
+    raw = models.JSONField(null=True, blank=True)
 
-    user_id: Mapped[uuid.UUID] = _user_fk()
-    level: Mapped[UserLevel] = mapped_column(USER_LEVEL)
-    title: Mapped[str] = mapped_column(String(200))
-    description: Mapped[str] = mapped_column(Text)
-    estimated_minutes: Mapped[int | None]
-    status: Mapped[ExerciseStatus] = mapped_column(EXERCISE_STATUS, default=ExerciseStatus.SUGGESTED)
+    class Meta:
+        verbose_name = "запись журнала состояния"
+        verbose_name_plural = "журнал состояния"
+        indexes = [models.Index(fields=["user", "created_at"], name="ix_statuslog_user_ct")]
+
+
+class ChatSession(UuidModel):
+    user = _user_fk("jedi_chat_sessions")
+    title = models.TextField(null=True, blank=True)
+    updated_at = models.DateTimeField("изменено", auto_now=True)
+
+    class Meta:
+        verbose_name = "чат"
+        verbose_name_plural = "чаты"
+        indexes = [models.Index(fields=["user", "updated_at"], name="ix_chatsession_user_upd")]
+
+    def __str__(self) -> str:
+        return f"Чат {self.user} от {self.created_at:%Y-%m-%d}"
+
+
+class ChatMessage(UuidModel):
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name="messages", verbose_name="чат")
+    user = _user_fk("jedi_chat_messages")
+    role = models.CharField("роль", max_length=20, choices=_choices(ChatRole))
+    content = models.TextField("текст")
+    meta = models.JSONField(db_column="metadata", null=True, blank=True)
+
+    class Meta:
+        verbose_name = "сообщение"
+        verbose_name_plural = "сообщения"
+        indexes = [models.Index(fields=["session", "created_at"], name="ix_chatmessage_session_ct")]
+
+
+class UserExercise(UuidModel):
+    user = _user_fk("jedi_exercises")
+    level = models.CharField("уровень", max_length=20, choices=USER_LEVEL_CHOICES)
+    title = models.CharField("название", max_length=200)
+    description = models.TextField("описание")
+    estimated_minutes = models.PositiveIntegerField("минут", null=True, blank=True)
+    status = models.CharField(
+        "оценка", max_length=20, choices=_choices(ExerciseStatus), default=ExerciseStatus.SUGGESTED
+    )
     # RAG chunks live in ChromaDB, so references are stored as JSON instead of foreign keys.
-    sources: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    sources = models.JSONField(null=True, blank=True)
+    updated_at = models.DateTimeField("изменено", auto_now=True)
+
+    class Meta:
+        verbose_name = "упражнение"
+        verbose_name_plural = "упражнения"
+        indexes = [models.Index(fields=["user", "status"], name="ix_exercise_user_status")]
+
+    def __str__(self) -> str:
+        return self.title
 
 
-class LevelTest(UuidPk, CreatedAt, Base):
+class LevelTest(UuidModel):
     """One attempt of the level test. An attempt without completed_at is the test currently running in the chat."""
 
-    __tablename__ = "level_tests"
-    __table_args__ = (
-        Index("ix_level_tests_user_created_at", "user_id", "created_at"),
-        CheckConstraint("energy_level between 1 and 10", name="ck_level_tests_energy_level"),
-    )
-
-    user_id: Mapped[uuid.UUID] = _user_fk()
+    user = _user_fk("jedi_level_tests")
     # [{"choice": displayed option number, "score": level of that option}, ...]; the next question is len(answers).
-    answers: Mapped[list[dict[str, int]]] = mapped_column(JSONB, default=list)
-    level: Mapped[UserLevel | None] = mapped_column(USER_LEVEL)
-    energy_level: Mapped[int | None] = mapped_column(SmallInteger)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    answers = models.JSONField(default=list, blank=True)
+    level = models.CharField("уровень", max_length=20, choices=USER_LEVEL_CHOICES, null=True, blank=True)
+    energy_level = models.PositiveSmallIntegerField("мыслетопливо", null=True, blank=True)
+    completed_at = models.DateTimeField("завершён", null=True, blank=True)
+
+    class Meta:
+        verbose_name = "попытка теста"
+        verbose_name_plural = "попытки теста"
+        indexes = [models.Index(fields=["user", "created_at"], name="ix_leveltest_user_ct")]
+        constraints = [_scale_check("leveltest", "energy_level")]

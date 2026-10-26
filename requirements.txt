@@ -1,11 +1,9 @@
-alembic==1.16.2
-asyncpg==0.30.0
-chromadb==1.0.15
-fastapi==0.115.14
+# Web container: Django, auth, admin, product API, LLM calls. No ML dependencies.
+Django==5.2.18
+gunicorn==23.0.0
+httpx==0.28.1
 langchain-core==0.3.68
 langchain-openai==0.3.27
-pydantic-settings==2.10.1
-pypdf==5.7.0
-sentence-transformers==5.0.0
-SQLAlchemy==2.0.41
-uvicorn[standard]==0.35.0
+psycopg[binary]==3.2.9
+pydantic==2.11.7
+whitenoise==6.9.0

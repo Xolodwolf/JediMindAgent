@@ -1,17 +1,21 @@
-"""Domain commands. The only place that changes product state; agent output is applied here after validation."""
+"""Domain commands. The only place that changes product state; agent output is applied here after validation.
+
+Django runs in autocommit mode: every save is committed at once. Multi-row changes use `transaction.atomic`,
+and LLM calls always happen outside a transaction, after the user's message is already stored.
+"""
 
 import logging
-import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from fastapi.concurrency import run_in_threadpool
-from sqlalchemy import delete, or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 
 from jedi_mind_agent.ai.agent import History, JediAgent
 from jedi_mind_agent.ai.schemas import DiagnosticUpdate, ExerciseProposal
+from jedi_mind_agent.knowledge.rag import RetrievalResult, format_rag_context
 from jedi_mind_agent.product import level_test
 from jedi_mind_agent.product.enums import (
     EXERCISE_TRANSITIONS,
@@ -25,24 +29,19 @@ from jedi_mind_agent.product.models import (
     ChatMessage,
     ChatSession,
     LevelTest,
-    User,
     UserExercise,
     UserState,
     UserStatusLog,
-    utcnow,
 )
-from jedi_mind_agent.rag.retrieval import format_rag_context
-from jedi_mind_agent.rag.schemas import RetrievalResult
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USERNAME = "default"
 HISTORY_LIMIT = 20
 # The book suggests working on a small portion of practices at a time.
 MAX_NEW_EXERCISES = 3
 
-# Everything a reset deletes. Chat messages come before chat sessions because they reference them.
-USER_DATA_MODELS = (ChatMessage, ChatSession, UserExercise, LevelTest, UserStatusLog)
+# Everything a reset deletes. Chat messages are deleted with their sessions.
+USER_DATA_MODELS = (ChatSession, UserExercise, LevelTest, UserStatusLog)
 
 # (query, max_level) -> book chunks with level <= max_level
 Retriever = Callable[[str, int], list[RetrievalResult]]
@@ -68,223 +67,169 @@ class ChatTurn:
 # --- queries -----------------------------------------------------------------
 
 
-async def get_state(session: AsyncSession, user_id: uuid.UUID) -> UserState:
-    state = await session.scalar(select(UserState).where(UserState.user_id == user_id))
-    if state is None:
-        state = UserState(user_id=user_id, level=UserLevel.UNKNOWN)
-        session.add(state)
-        await session.flush()
+def get_state(user_id: int) -> UserState:
+    state, _ = UserState.objects.get_or_create(user_id=user_id, defaults={"level": UserLevel.UNKNOWN})
     return state
 
 
-async def find_chat_session(session: AsyncSession, user_id: uuid.UUID) -> ChatSession | None:
-    return await session.scalar(
-        select(ChatSession).where(ChatSession.user_id == user_id).order_by(ChatSession.updated_at.desc()).limit(1)
-    )
+def find_chat_session(user_id: int) -> ChatSession | None:
+    return ChatSession.objects.filter(user_id=user_id).order_by("-updated_at").first()
 
 
-async def list_messages(
-    session: AsyncSession, chat_session_id: uuid.UUID, limit: int | None = None, *, exclude_test: bool = False
-) -> list[ChatMessage]:
-    stmt = select(ChatMessage).where(ChatMessage.session_id == chat_session_id)
+def list_messages(chat_session_id, limit: int | None = None, *, exclude_test: bool = False) -> list[ChatMessage]:
+    messages = ChatMessage.objects.filter(session_id=chat_session_id)
     if exclude_test:
         # Test questions and answers stay in the chat, but never take up the agent's history window.
-        stmt = stmt.where(or_(ChatMessage.meta.is_(None), ~ChatMessage.meta.has_key("test")))
-    stmt = stmt.order_by(ChatMessage.created_at.desc())
+        messages = messages.filter(Q(meta__isnull=True) | ~Q(meta__has_key="test"))
+    messages = messages.order_by("-created_at")
     if limit is not None:
-        stmt = stmt.limit(limit)
-    return list(reversed((await session.scalars(stmt)).all()))
+        messages = messages[:limit]
+    return list(reversed(messages))
 
 
-async def list_user_messages(session: AsyncSession, user_id: uuid.UUID) -> list[ChatMessage]:
-    chat = await find_chat_session(session, user_id)
-    return await list_messages(session, chat.id) if chat else []
+def list_user_messages(user_id: int) -> list[ChatMessage]:
+    chat = find_chat_session(user_id)
+    return list_messages(chat.id) if chat else []
 
 
-async def list_exercises(session: AsyncSession, user_id: uuid.UUID) -> list[UserExercise]:
-    return list(
-        await session.scalars(
-            select(UserExercise).where(UserExercise.user_id == user_id).order_by(UserExercise.updated_at.desc())
-        )
-    )
+def list_exercises(user_id: int) -> list[UserExercise]:
+    return list(UserExercise.objects.filter(user_id=user_id).order_by("-updated_at"))
 
 
-async def find_active_test(session: AsyncSession, user_id: uuid.UUID) -> LevelTest | None:
-    return await session.scalar(
-        select(LevelTest)
-        .where(LevelTest.user_id == user_id, LevelTest.completed_at.is_(None))
-        .order_by(LevelTest.created_at.desc())
-        .limit(1)
-    )
+def find_active_test(user_id: int) -> LevelTest | None:
+    return LevelTest.objects.filter(user_id=user_id, completed_at__isnull=True).order_by("-created_at").first()
 
 
 # --- commands ----------------------------------------------------------------
 
 
-async def get_or_create_user(session: AsyncSession, username: str) -> User:
-    user = await session.scalar(select(User).where(User.username == username))
-    if user is not None:
-        return user
-
-    user = User(username=username)
-    session.add(user)
-    await session.flush()
-    session.add(UserState(user_id=user.id, level=UserLevel.UNKNOWN))
-    await session.commit()
-    return user
-
-
-async def reset_user(session: AsyncSession, user_id: uuid.UUID) -> UserState:
-    """Delete all of the user's product data in one transaction. The user and an empty state remain."""
-    for model in USER_DATA_MODELS:
-        await session.execute(delete(model).where(model.user_id == user_id))
-
-    await session.execute(
-        update(UserState)
-        .where(UserState.user_id == user_id)
-        .values(
-            level=UserLevel.UNKNOWN,
-            energy_level=None,
-            focus_level=None,
-            main_problem=None,
-            time_limit_minutes=None,
-            diagnostic_completed_at=None,
-            updated_at=utcnow(),
-        )
-        .execution_options(synchronize_session="fetch")
-    )
-    await session.commit()
-    return await get_state(session, user_id)
+def reset_user(user_id: int) -> UserState:
+    """Delete all of the user's product data in one transaction. The account and an empty state remain."""
+    with transaction.atomic():
+        for model in USER_DATA_MODELS:
+            model.objects.filter(user_id=user_id).delete()
+        state = get_state(user_id)
+        state.level = UserLevel.UNKNOWN
+        state.energy_level = state.focus_level = state.main_problem = state.time_limit_minutes = None
+        state.diagnostic_completed_at = None
+        state.save()
+    return state
 
 
-async def change_exercise_status(
-    session: AsyncSession, *, user_id: uuid.UUID, exercise_id: uuid.UUID, target: ExerciseStatus
-) -> UserExercise:
-    exercise = await session.get(UserExercise, exercise_id)
-    if exercise is None or exercise.user_id != user_id:
+def change_exercise_status(*, user_id: int, exercise_id, target: ExerciseStatus) -> UserExercise:
+    exercise = UserExercise.objects.filter(id=exercise_id, user_id=user_id).first()
+    if exercise is None:
         raise NotFoundError("Упражнение не найдено.")
-    if target not in EXERCISE_TRANSITIONS.get(exercise.status, ()):
+    if target not in EXERCISE_TRANSITIONS.get(ExerciseStatus(exercise.status), ()):
         raise DomainError(f"Недопустимый переход статуса: {exercise.status} → {target}.")
 
     exercise.status = target
-    await session.commit()
+    exercise.save(update_fields=["status", "updated_at"])
     return exercise
 
 
-async def delete_exercise(session: AsyncSession, *, user_id: uuid.UUID, exercise_id: uuid.UUID) -> None:
-    exercise = await session.get(UserExercise, exercise_id)
-    if exercise is None or exercise.user_id != user_id:
+def delete_exercise(*, user_id: int, exercise_id) -> None:
+    deleted, _ = UserExercise.objects.filter(id=exercise_id, user_id=user_id).delete()
+    if not deleted:
         raise NotFoundError("Упражнение не найдено.")
-    await session.delete(exercise)
-    await session.commit()
 
 
-async def start_level_test(session: AsyncSession, *, user_id: uuid.UUID, restart: bool) -> ChatTurn:
+def start_level_test(*, user_id: int, restart: bool) -> ChatTurn:
     """Ask the first test question in the chat. Without `restart` an unfinished test is resumed as it is."""
-    state = await get_state(session, user_id)
-    active = await find_active_test(session, user_id)
-    if active is not None:
-        if not restart:
-            return ChatTurn([], state)
-        await session.delete(active)
+    state = get_state(user_id)
+    with transaction.atomic():
+        active = find_active_test(user_id)
+        if active is not None:
+            if not restart:
+                return ChatTurn([], state)
+            active.delete()
 
-    chat = await _get_or_create_chat_session(session, user_id)
-    test = LevelTest(user_id=user_id, answers=[])
-    session.add(test)
-    await session.flush()
-    question = await _post_test_question(session, chat, test, step=0, prefix=level_test.INTRO)
+        chat = _get_or_create_chat_session(user_id)
+        test = LevelTest.objects.create(user_id=user_id, answers=[])
+        question = _post_test_question(chat, test, step=0, prefix=level_test.INTRO)
     return ChatTurn([question], state)
 
 
-async def handle_chat_message(
-    session: AsyncSession,
-    *,
-    user_id: uuid.UUID,
-    text: str,
-    agent: JediAgent,
-    retrieve: Retriever | None,
-) -> ChatTurn:
-    state = await get_state(session, user_id)
-    test = await find_active_test(session, user_id)
+def handle_chat_message(*, user_id: int, text: str, agent: JediAgent, retrieve: Retriever | None) -> ChatTurn:
+    state = get_state(user_id)
+    test = find_active_test(user_id)
     if test is not None:
-        return await _answer_level_test(session, test=test, state=state, text=text, agent=agent)
+        return _answer_level_test(test=test, state=state, text=text, agent=agent)
 
-    chat = await _get_or_create_chat_session(session, user_id)
-    user_message = _add_message(session, chat, ChatRole.USER, text)
-    # Commit before the LLM call: the user's message survives an agent failure.
-    await session.commit()
+    chat = _get_or_create_chat_session(user_id)
+    # Saved before the LLM call: the user's message survives an agent failure.
+    user_message = _add_message(chat, ChatRole.USER, text)
 
     if state.level == UserLevel.UNKNOWN:
         # Only the test sets the level, so a conversation without a level starts with the test.
-        turn = await start_level_test(session, user_id=user_id, restart=False)
+        turn = start_level_test(user_id=user_id, restart=False)
         return ChatTurn([user_message, *turn.messages], turn.state)
 
-    exercises = await list_exercises(session, user_id)
-    history = await list_messages(session, chat.id, limit=HISTORY_LIMIT, exclude_test=True)
+    exercises = list_exercises(user_id)
+    history = list_messages(chat.id, limit=HISTORY_LIMIT, exclude_test=True)
     # The level is the ceiling of practices, so book sections above it never reach the agent's context.
-    rag_results = await _retrieve(retrieve, text, LEVEL_RANK[state.level]) if retrieve else []
+    rag_results = _retrieve(retrieve, text, LEVEL_RANK[UserLevel(state.level)]) if retrieve else []
 
-    reply, used_fallback = await agent.reply(
+    reply, used_fallback = agent.reply(
         user_context=build_user_context(state, exercises),
         history=_to_history(history),
         rag_context=format_rag_context(rag_results) if rag_results else None,
     )
 
     new_exercises: list[UserExercise] = []
-    if not used_fallback:
-        _apply_diagnostic(session, user_id, state, reply.diagnostic)
-        exercise = _apply_exercise_proposal(session, user_id, state, exercises, reply.exercise, rag_results)
-        if exercise is not None:
-            new_exercises.append(exercise)
+    with transaction.atomic():
+        if not used_fallback:
+            _apply_diagnostic(user_id, state, reply.diagnostic)
+            exercise = _apply_exercise_proposal(user_id, state, exercises, reply.exercise, rag_results)
+            if exercise is not None:
+                new_exercises.append(exercise)
 
-    assistant_message = _add_message(
-        session,
-        chat,
-        ChatRole.ASSISTANT,
-        _unescape_newlines(reply.answer),
-        {"used_fallback": used_fallback, "sources": [_source_ref(result) for result in rag_results]},
-    )
-    await session.commit()
+        assistant_message = _add_message(
+            chat,
+            ChatRole.ASSISTANT,
+            _unescape_newlines(reply.answer),
+            {"used_fallback": used_fallback, "sources": [_source_ref(result) for result in rag_results]},
+        )
     return ChatTurn([user_message, assistant_message], state, new_exercises)
 
 
 # --- level test --------------------------------------------------------------
 
 
-async def _answer_level_test(
-    session: AsyncSession, *, test: LevelTest, state: UserState, text: str, agent: JediAgent
-) -> ChatTurn:
+def _answer_level_test(*, test: LevelTest, state: UserState, text: str, agent: JediAgent) -> ChatTurn:
     """Handle a chat message as a test answer. Deterministic: the LLM only explains the final result."""
-    chat = await _get_or_create_chat_session(session, test.user_id)
+    chat = _get_or_create_chat_session(test.user_id)
     step = len(test.answers)
     choice = level_test.parse_choice(text, step)
 
     user_message = _add_message(
-        session,
         chat,
         ChatRole.USER,
         level_test.answer_label(step, choice) if choice else text,
         {"test": {"test_id": str(test.id), "step": step, "choice": choice}},
     )
-    await session.commit()
 
     if choice is None:
-        question = await _post_test_question(session, chat, test, step=step, prefix=level_test.INVALID_ANSWER)
+        question = _post_test_question(chat, test, step=step, prefix=level_test.INVALID_ANSWER)
         return ChatTurn([user_message, question], state)
 
     if step < level_test.ENERGY_STEP:
-        # Reassign instead of appending: in-place changes of a JSONB list are not tracked.
-        test.answers = [*test.answers, {"choice": choice, "score": level_test.score(step, choice)}]
-        question = await _post_test_question(session, chat, test, step=step + 1)
+        with transaction.atomic():
+            test.answers = [*test.answers, {"choice": choice, "score": level_test.score(step, choice)}]
+            test.save(update_fields=["answers"])
+            question = _post_test_question(chat, test, step=step + 1)
         return ChatTurn([user_message, question], state)
 
     # The mental fuel scale is the last step: the test is complete.
     level = level_test.level_from_scores([answer["score"] for answer in test.answers])
-    now = utcnow()
-    test.level, test.energy_level, test.completed_at = level, choice, now
-    state.level, state.energy_level, state.diagnostic_completed_at = level, choice, now
-    session.add(
-        UserStatusLog(
+    now = timezone.now()
+    # Saved before the LLM call: the explanation is optional, the level is not.
+    with transaction.atomic():
+        test.level, test.energy_level, test.completed_at = level, choice, now
+        test.save(update_fields=["level", "energy_level", "completed_at"])
+        state.level, state.energy_level, state.diagnostic_completed_at = level, choice, now
+        state.save()
+        UserStatusLog.objects.create(
             user_id=test.user_id,
             level=level,
             energy_level=choice,
@@ -292,33 +237,25 @@ async def _answer_level_test(
             summary="Level test",
             raw={"test_id": str(test.id), "answers": test.answers},
         )
-    )
-    # Commit the result before the LLM call: the explanation is optional, the level is not.
-    await session.commit()
 
-    explanation = await agent.explain_test_result(
+    explanation = agent.explain_test_result(
         level_rank=LEVEL_RANK[level],
         level_title=LEVEL_TITLES[level],
         energy_level=choice,
         answers=level_test.describe_answers(test.answers),
     )
     result = _add_message(
-        session,
         chat,
         ChatRole.ASSISTANT,
         level_test.result_text(level, choice, explanation),
         {"used_fallback": explanation is None, "sources": []},
     )
-    await session.commit()
     return ChatTurn([user_message, result], state)
 
 
-async def _post_test_question(
-    session: AsyncSession, chat: ChatSession, test: LevelTest, *, step: int, prefix: str | None = None
-) -> ChatMessage:
+def _post_test_question(chat: ChatSession, test: LevelTest, *, step: int, prefix: str | None = None) -> ChatMessage:
     text = level_test.question_text(step)
-    message = _add_message(
-        session,
+    return _add_message(
         chat,
         ChatRole.ASSISTANT,
         f"{prefix}\n\n{text}" if prefix else text,
@@ -334,8 +271,6 @@ async def _post_test_question(
             },
         },
     )
-    await session.commit()
-    return message
 
 
 # --- helpers -----------------------------------------------------------------
@@ -364,9 +299,7 @@ def build_user_context(state: UserState, exercises: Sequence[UserExercise]) -> s
     return "\n".join(lines)
 
 
-def _apply_diagnostic(
-    session: AsyncSession, user_id: uuid.UUID, state: UserState, update: DiagnosticUpdate | None
-) -> None:
+def _apply_diagnostic(user_id: int, state: UserState, update: DiagnosticUpdate | None) -> None:
     # The level is not here on purpose: only the level test sets it.
     if update is None:
         return
@@ -383,21 +316,19 @@ def _apply_diagnostic(
             changed = True
 
     if changed:
-        session.add(
-            UserStatusLog(
-                user_id=user_id,
-                level=state.level,
-                energy_level=state.energy_level,
-                focus_level=state.focus_level,
-                summary="Diagnostic update from chat",
-                raw=update.model_dump(mode="json"),
-            )
+        state.save()
+        UserStatusLog.objects.create(
+            user_id=user_id,
+            level=state.level,
+            energy_level=state.energy_level,
+            focus_level=state.focus_level,
+            summary="Diagnostic update from chat",
+            raw=update.model_dump(mode="json"),
         )
 
 
 def _apply_exercise_proposal(
-    session: AsyncSession,
-    user_id: uuid.UUID,
+    user_id: int,
     state: UserState,
     exercises: Sequence[UserExercise],
     proposal: ExerciseProposal | None,
@@ -408,9 +339,10 @@ def _apply_exercise_proposal(
 
     # Guardrail from the book: the user's level is the ceiling of practices.
     # An unspecified or unknown practice level defaults to the user's level.
-    level = proposal.level if proposal.level not in (None, UserLevel.UNKNOWN) else state.level
-    if LEVEL_RANK[level] > LEVEL_RANK[state.level]:
-        logger.info("Exercise proposal rejected: practice level %s is above user level %s", level, state.level)
+    user_level = UserLevel(state.level)
+    level = proposal.level if proposal.level not in (None, UserLevel.UNKNOWN) else user_level
+    if LEVEL_RANK[level] > LEVEL_RANK[user_level]:
+        logger.info("Exercise proposal rejected: practice level %s is above user level %s", level, user_level)
         return None
 
     title = _text(proposal.title)
@@ -427,7 +359,7 @@ def _apply_exercise_proposal(
         return None
 
     minutes = proposal.estimated_minutes
-    exercise = UserExercise(
+    return UserExercise.objects.create(
         user_id=user_id,
         level=level,
         title=title[:200],
@@ -436,38 +368,28 @@ def _apply_exercise_proposal(
         status=ExerciseStatus.SUGGESTED,
         sources=[{"chunk_id": r.chunk_id, **_source_ref(r)} for r in rag_results] or None,
     )
-    session.add(exercise)
-    return exercise
 
 
-async def _get_or_create_chat_session(session: AsyncSession, user_id: uuid.UUID) -> ChatSession:
-    chat = await find_chat_session(session, user_id)
-    if chat is None:
-        chat = ChatSession(user_id=user_id)
-        session.add(chat)
-        await session.flush()
-    return chat
+def _get_or_create_chat_session(user_id: int) -> ChatSession:
+    return find_chat_session(user_id) or ChatSession.objects.create(user_id=user_id)
 
 
-def _add_message(
-    session: AsyncSession, chat: ChatSession, role: ChatRole, content: str, meta: dict[str, Any] | None = None
-) -> ChatMessage:
-    message = ChatMessage(session_id=chat.id, user_id=chat.user_id, role=role, content=content, meta=meta)
-    session.add(message)
-    chat.updated_at = utcnow()
+def _add_message(chat: ChatSession, role: ChatRole, content: str, meta: dict[str, Any] | None = None) -> ChatMessage:
+    message = ChatMessage.objects.create(session=chat, user_id=chat.user_id, role=role, content=content, meta=meta)
+    chat.save(update_fields=["updated_at"])
     return message
 
 
-async def _retrieve(retrieve: Retriever, query: str, max_level: int) -> list[RetrievalResult]:
+def _retrieve(retrieve: Retriever, query: str, max_level: int) -> list[RetrievalResult]:
     try:
-        return await run_in_threadpool(retrieve, query, max_level)
+        return retrieve(query, max_level)
     except Exception:
         logger.exception("RAG retrieval failed; answering without book context")
         return []
 
 
 def _to_history(messages: Sequence[ChatMessage]) -> History:
-    return [(message.role.value, message.content) for message in messages]
+    return [(message.role, message.content) for message in messages]
 
 
 def _source_ref(result: RetrievalResult) -> dict:
