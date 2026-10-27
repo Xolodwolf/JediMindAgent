@@ -16,7 +16,7 @@ RUN useradd --uid 1000 --create-home app && mkdir -p /app/media && chown app /ap
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY manage.py ./
+COPY manage.py docker/start-web.sh ./
 COPY src/jedi_mind_agent ./src/jedi_mind_agent
 COPY tests ./tests
 RUN DJANGO_SECRET_KEY=collectstatic python manage.py collectstatic --noinput
@@ -24,4 +24,4 @@ RUN DJANGO_SECRET_KEY=collectstatic python manage.py collectstatic --noinput
 USER app
 EXPOSE 8000
 
-CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py ensure_superuser && exec gunicorn jedi_mind_agent.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 8 --timeout 120 --access-logfile -"]
+CMD ["./start-web.sh"]

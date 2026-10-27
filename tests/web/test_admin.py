@@ -1,15 +1,17 @@
 """Admin settings: the active LLM model and the book queue. Run: python manage.py test tests.web"""
 
 import tempfile
+from pathlib import Path
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
 from django.test import TestCase
 
 from jedi_mind_agent.ai.agent import JediAgent, get_agent
 from jedi_mind_agent.ai.config import get_llm_config
 from jedi_mind_agent.ai.models import LLMGateway, LLMModel
-from jedi_mind_agent.knowledge.models import Book, BookStatus, RagSettings
+from jedi_mind_agent.knowledge.models import Book, BookStatus, chunk_store_stats
 
 PDF = b"%PDF-1.4\n%fake but with a valid header\n"
 
@@ -83,11 +85,7 @@ class BookAdminTest(AdminTestCase):
             {"title": title, "slug": "", "file": SimpleUploadedFile(name, content, content_type="application/pdf")},
         )
 
-    def test_upload_queues_the_book_with_current_chroma_settings(self):
-        settings = RagSettings.load()
-        settings.chroma_collection = "books_v2"
-        settings.save()
-
+    def test_upload_queues_the_book(self):
         response = self.upload()
 
         self.assertEqual(response.status_code, 302)
@@ -95,7 +93,6 @@ class BookAdminTest(AdminTestCase):
         self.assertEqual(book.status, BookStatus.PENDING)
         self.assertEqual(book.revision, 1)
         self.assertEqual(book.slug, "jedi-path")  # the Cyrillic title gives no slug, the file name does
-        self.assertEqual(book.ingest_config, {"host": "chroma", "port": 8000, "collection": "books_v2"})
 
     def test_change_page_shows_worker_results_and_fixes_the_slug(self):
         self.upload()
@@ -113,22 +110,38 @@ class BookAdminTest(AdminTestCase):
         self.assertContains(response, "Это не PDF-файл.")
         self.assertFalse(Book.objects.exists())
 
-    def test_reindex_and_remove_actions(self):
+    def test_reindex_action(self):
         self.upload()
         book = Book.objects.get()
         Book.objects.filter(pk=book.pk).update(status=BookStatus.READY)
 
         self.client.post("/admin/knowledge/book/", {"action": "reindex", "_selected_action": [book.pk]})
+
         book.refresh_from_db()
         self.assertEqual((book.status, book.revision), (BookStatus.PENDING, 2))
 
-        self.client.post("/admin/knowledge/book/", {"action": "remove", "_selected_action": [book.pk]})
-        book.refresh_from_db()
-        self.assertEqual((book.status, book.revision), (BookStatus.DELETING, 3))
-        # The row stays until the worker has removed the chunks from ChromaDB.
-        self.assertTrue(Book.objects.filter(pk=book.pk).exists())
+    def test_delete_removes_chunks_and_file(self):
+        self.upload()
+        book = Book.objects.get()
+        path = Path(book.file.path)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO rag_chunks (id, book_id, source_slug, source_title, source_filename, file_hash, "
+                "chunk_index, chunk_hash, page_start, page_end, level, text, embedding_model, embedding) "
+                "VALUES ('jedi-path:0:x', %s, 'jedi-path', 't', 'f', 'h', 0, 'x', 1, 1, 0, 'text', 'm', %s)",
+                [book.pk, "[" + ",".join(["0"] * 384) + "]"],
+            )
+
+        self.client.post(
+            "/admin/knowledge/book/", {"action": "delete_selected", "_selected_action": [book.pk], "post": "yes"}
+        )
+
+        self.assertFalse(Book.objects.exists())
+        self.assertEqual(chunk_store_stats()["count"], 0)
+        self.assertFalse(path.exists())
 
     def test_rag_settings_page_reports_an_unreachable_service(self):
         response = self.client.get("/admin/knowledge/ragsettings/", follow=True)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "RAG-сервис недоступен")
+        self.assertContains(response, "фрагментов книг: 0")

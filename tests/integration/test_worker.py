@@ -1,6 +1,6 @@
-"""The RAG worker against the Django `rag_books` table on PostgreSQL, with ChromaDB and the model replaced by fakes.
+"""The RAG worker and the pgvector store against the Django tables on PostgreSQL; only the model and PDF parsing are fakes.
 
-Needs both the web and the RAG dependencies (chromadb-client, pypdf) and a PostgreSQL DATABASE_URL:
+Needs both the web and the RAG dependencies and a PostgreSQL DATABASE_URL with the pgvector extension available:
     DATABASE_URL=postgresql://... python manage.py test tests.integration
 """
 
@@ -14,47 +14,47 @@ from django.db import connection
 from django.test import TransactionTestCase
 
 try:
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+
+    from rag_service import store
     from rag_service import worker as worker_module
     from rag_service.schemas import PageText
 except ImportError:  # the web image has no RAG dependencies
     worker_module = None
 
-from jedi_mind_agent.knowledge.models import Book, BookStatus, RagSettings
+from jedi_mind_agent.knowledge.models import Book, BookStatus, chunk_store_stats
 
 PAGES = [
     PageText(page_number=1, text="Введение. " * 200),
     PageText(page_number=2, text="6.1. Первый уровень. Все горит\n" + "Практика. " * 200),
+    PageText(page_number=3, text="6.2. Второй уровень. Ночь простоять\n" + "Список задач. " * 150),
 ]
 
 
-class FakeStore:
-    """In-memory ChromaDB: {collection: {slug: chunk count}}."""
-
-    data: dict[str, dict[str, int]] = {}
-
-    def __init__(self, config) -> None:
-        self.collection_name = config.collection
-        self._chunks = FakeStore.data.setdefault(config.collection, {})
-
-    def delete_source(self, slug: str) -> None:
-        self._chunks.pop(slug, None)
-
-    def upsert_chunks(self, *, chunks, source_slug, **_) -> None:
-        self._chunks[source_slug] = len(chunks)
+def unit(index: int) -> list[float]:
+    vector = [0.0] * 384
+    vector[index] = 1.0
+    return vector
 
 
 class FakeEmbeddings:
+    """Every text gets the same unit vector; the query vector decides the distance."""
+
     on_embed = None
 
     def embed(self, texts):
         if self.on_embed:
             self.on_embed()
-        return [[0.1, 0.2, 0.3] for _ in texts]
+        return [unit(0) for _ in texts]
 
 
 @unittest.skipIf(worker_module is None, "RAG dependencies are not installed")
-@unittest.skipUnless(connection.vendor == "postgresql", "the worker uses PostgreSQL-only SQL")
+@unittest.skipUnless(connection.vendor == "postgresql", "pgvector needs PostgreSQL")
 class BookWorkerTest(TransactionTestCase):
+    # With available_apps the flush between tests uses TRUNCATE ... CASCADE, which also empties rag_chunks.
+    available_apps = ["jedi_mind_agent.knowledge"]
+
     def setUp(self) -> None:
         media = tempfile.TemporaryDirectory()
         self.addCleanup(media.cleanup)
@@ -63,13 +63,7 @@ class BookWorkerTest(TransactionTestCase):
         override.enable()
         self.addCleanup(override.disable)
 
-        FakeStore.data = {}
-        self.embeddings = FakeEmbeddings()
-        for target, value in (
-            ("ChromaRagStore", FakeStore),
-            ("MEDIA_ROOT", self.media),
-            ("WORKER_STALE_MINUTES", 30),
-        ):
+        for target, value in (("MEDIA_ROOT", self.media), ("DELETE_PDF_AFTER_INDEXING", False)):
             patcher = mock.patch.object(worker_module, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -79,42 +73,56 @@ class BookWorkerTest(TransactionTestCase):
 
         db = connection.settings_dict
         dsn = f"postgresql://{db['USER']}:{db['PASSWORD']}@{db['HOST']}:{db['PORT'] or 5432}/{db['NAME']}"
-        self.worker = worker_module.BookWorker(self.embeddings, database_url=dsn)
+        self.pool = ConnectionPool(dsn, min_size=1, max_size=2, kwargs={"autocommit": True, "row_factory": dict_row})
+        self.addCleanup(self.pool.close)
 
-    def queue_book(self, title: str = "Путь джедая") -> Book:
-        book = Book(title=title, slug="jedi-path")
-        book.file.save("jedi-path.pdf", ContentFile(b"%PDF-1.4 fake"), save=False)
+        self.embeddings = FakeEmbeddings()
+        self.worker = worker_module.BookWorker(self.embeddings, pool=self.pool)
+
+    def queue_book(self, slug: str = "jedi-path") -> Book:
+        book = Book(title="Путь джедая", slug=slug)
+        book.file.save(f"{slug}.pdf", ContentFile(b"%PDF-1.4 fake"), save=False)
         book.enqueue()
         return book
+
+    def search(self, **kwargs):
+        with self.pool.connection() as conn:
+            return store.query(conn, query_embedding=unit(0), top_k=50, **kwargs)
 
     def test_empty_queue(self):
         self.assertFalse(self.worker.process_next())
 
-    def test_ingest(self):
+    def test_ingest_writes_chunks_with_levels(self):
         book = self.queue_book()
         self.assertTrue(self.worker.process_next())
 
         book.refresh_from_db()
         self.assertEqual(book.status, BookStatus.READY)
-        self.assertEqual(book.page_count, 2)
-        self.assertEqual(set(book.chunks_by_level), {"0", "1"})  # the introduction and the first level
-        self.assertEqual(sum(book.chunks_by_level.values()), book.chunk_count)
-        self.assertEqual(book.indexed_config, book.ingest_config)
-        self.assertEqual(FakeStore.data["jedi_mind_agent_chunks"], {"jedi-path": book.chunk_count})
+        self.assertEqual(book.page_count, 3)
+        self.assertEqual(set(book.chunks_by_level), {"0", "1", "2"})
+        self.assertEqual(chunk_store_stats()["count"], book.chunk_count)
         self.assertFalse(self.worker.process_next())
 
-    def test_reindex_after_chroma_settings_change_moves_the_chunks(self):
-        book = self.queue_book()
+    def test_search_respects_the_level_ceiling(self):
+        self.queue_book()
         self.worker.process_next()
 
-        settings = RagSettings.load()
-        settings.chroma_collection = "books_v2"
-        settings.save()
+        self.assertEqual({r.level for r in self.search()}, {0, 1, 2})
+        self.assertEqual({r.level for r in self.search(max_level=1)}, {0, 1})
+        results = self.search(max_level=0)
+        self.assertTrue(results)
+        self.assertAlmostEqual(results[0].score, 0.0, places=5)  # identical unit vectors
+        self.assertEqual(results[0].source_title, "Путь джедая")
+
+    def test_reindex_replaces_chunks(self):
+        book = self.queue_book()
+        self.worker.process_next()
+        before = chunk_store_stats()["count"]
+
         Book.enqueue_many(Book.objects.filter(pk=book.pk))
         self.worker.process_next()
 
-        self.assertEqual(FakeStore.data["jedi_mind_agent_chunks"], {})
-        self.assertIn("jedi-path", FakeStore.data["books_v2"])
+        self.assertEqual(chunk_store_stats()["count"], before)
 
     def test_book_requeued_during_processing_is_processed_again(self):
         book = self.queue_book()
@@ -123,11 +131,32 @@ class BookWorkerTest(TransactionTestCase):
 
         book.refresh_from_db()
         self.assertEqual((book.status, book.revision), (BookStatus.PENDING, 2))
+        self.assertEqual(chunk_store_stats()["count"], 0)  # nothing of the stale revision was written
 
         self.embeddings.on_embed = None
         self.worker.process_next()
         book.refresh_from_db()
         self.assertEqual((book.status, book.revision), (BookStatus.READY, 2))
+
+    def test_book_deleted_during_processing_is_skipped(self):
+        book = self.queue_book()
+        self.embeddings.on_embed = lambda: Book.objects.filter(pk=book.pk).delete()
+        self.worker.process_next()
+
+        self.assertFalse(Book.objects.exists())
+        self.assertEqual(chunk_store_stats()["count"], 0)
+
+    def test_deleting_a_book_removes_its_chunks(self):
+        book = self.queue_book()
+        self.worker.process_next()
+        other = self.queue_book(slug="other-book")
+        self.worker.process_next()
+
+        book.delete()
+
+        self.assertEqual({r.source_slug for r in self.search()}, {"other-book"})
+        other.refresh_from_db()
+        self.assertEqual(chunk_store_stats()["count"], other.chunk_count)
 
     def test_missing_file_fails_the_job(self):
         book = self.queue_book()
@@ -136,16 +165,13 @@ class BookWorkerTest(TransactionTestCase):
 
         book.refresh_from_db()
         self.assertEqual(book.status, BookStatus.FAILED)
-        self.assertIn("FileNotFoundError", book.error)
+        self.assertIn("Загрузите файл заново", book.error)
 
-    def test_deletion_removes_chunks_file_and_row(self):
+    def test_pdf_can_be_removed_after_indexing(self):
         book = self.queue_book()
-        self.worker.process_next()
-        path = self.media / book.file.name
+        with mock.patch.object(worker_module, "DELETE_PDF_AFTER_INDEXING", True):
+            self.worker.process_next()
 
-        Book.request_deletion(Book.objects.filter(pk=book.pk))
-        self.assertTrue(self.worker.process_next())
-
-        self.assertFalse(Book.objects.filter(pk=book.pk).exists())
-        self.assertEqual(FakeStore.data["jedi_mind_agent_chunks"], {})
-        self.assertFalse(path.exists())
+        book.refresh_from_db()
+        self.assertEqual(book.status, BookStatus.READY)
+        self.assertFalse((self.media / book.file.name).exists())

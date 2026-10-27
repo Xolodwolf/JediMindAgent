@@ -1,4 +1,4 @@
-"""Client of the RAG service. The web container has no ML dependencies: embeddings and ChromaDB queries run there."""
+"""Client of the RAG service. The web container has no ML dependencies: embeddings and vector search run there."""
 
 import httpx
 from pydantic import BaseModel
@@ -25,17 +25,13 @@ class RetrievalResult(BaseModel):
 def retrieve(query: str, *, max_level: int, settings: RagSettings | None = None) -> list[RetrievalResult]:
     """Book chunks with level <= max_level, most relevant first."""
     settings = settings or RagSettings.load()
-    data = _post(
-        settings,
-        "/retrieve",
-        {"query": query, "top_k": settings.top_k, "max_level": max_level, "chroma": settings.chroma_config()},
-    )
+    data = _request(settings, "POST", "/retrieve", {"query": query, "top_k": settings.top_k, "max_level": max_level})
     return [RetrievalResult.model_validate(item) for item in data["results"]]
 
 
 def check_health(settings: RagSettings) -> dict:
-    """State of the RAG service, its worker and the configured ChromaDB collection."""
-    return _post(settings, "/health/chroma", {"chroma": settings.chroma_config()})
+    """State of the RAG service, its worker and the chunk store as the service sees it."""
+    return _request(settings, "GET", "/health")
 
 
 def format_rag_context(results: list[RetrievalResult]) -> str:
@@ -46,10 +42,10 @@ def format_rag_context(results: list[RetrievalResult]) -> str:
     return "\n\n".join(blocks)
 
 
-def _post(settings: RagSettings, path: str, payload: dict) -> dict:
+def _request(settings: RagSettings, method: str, path: str, payload: dict | None = None) -> dict:
     url = settings.rag_service_url.rstrip("/") + path
     try:
-        response = httpx.post(url, json=payload, timeout=settings.request_timeout_seconds)
+        response = httpx.request(method, url, json=payload, timeout=settings.request_timeout_seconds)
         response.raise_for_status()
         return response.json()
     except httpx.HTTPStatusError as exc:

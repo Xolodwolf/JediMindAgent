@@ -1,17 +1,11 @@
-{% load static %}<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>JediMindAgent</title>
-  <link rel="stylesheet" href="{% static 'app.css' %}">
-  <script type="module" src="{% static 'app.js' %}"></script>
-</head>
-<body>
+{% extends "web/base.html" %}
+{% load static %}
+{% block head %}<script type="module" src="{% static 'app.js' %}"></script>{% endblock %}
+{% block content %}
   <header class="topbar">
     <span class="brand">JediMindAgent</span>
     <div class="topbar-actions">
-      <span class="muted">{{ user.get_username }}</span>
+      <a class="muted" href="{% url 'password_change' %}" title="Сменить пароль">{{ user.get_username }}</a>
       {% if user.is_staff %}<a href="{% url 'admin:index' %}">Админка</a>{% endif %}
       <button id="reset-button" type="button">Начать сначала</button>
       <form method="post" action="{% url 'logout' %}">
@@ -62,5 +56,8 @@
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-</body>
-</html>
+{% endblock %}
+{% block scripts %}
+  {# State, history and exercises in the page itself: the interface renders without a first round of API calls. #}
+  {{ initial|json_script:"initial-data" }}
+{% endblock %}

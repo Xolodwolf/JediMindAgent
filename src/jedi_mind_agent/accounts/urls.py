@@ -7,4 +7,5 @@ urlpatterns = [
     path("login/", auth_views.LoginView.as_view(redirect_authenticated_user=True), name="login"),
     path("logout/", auth_views.LogoutView.as_view(), name="logout"),
     path("register/", views.register, name="register"),
+    path("password/", views.PasswordChangeView.as_view(), name="password_change"),
 ]

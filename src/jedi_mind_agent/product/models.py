@@ -106,7 +106,7 @@ class UserExercise(UuidModel):
     status = models.CharField(
         "оценка", max_length=20, choices=_choices(ExerciseStatus), default=ExerciseStatus.SUGGESTED
     )
-    # RAG chunks live in ChromaDB, so references are stored as JSON instead of foreign keys.
+    # Book chunks are re-created on every re-indexing, so references are stored as JSON instead of foreign keys.
     sources = models.JSONField(null=True, blank=True)
     updated_at = models.DateTimeField("изменено", auto_now=True)
 

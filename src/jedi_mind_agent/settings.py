@@ -1,10 +1,11 @@
 """Django settings. Everything environment-specific comes from environment variables (see .env.example).
 
 Connections that the app itself depends on (PostgreSQL, the secret key) are configured here. Runtime settings
-of the agent — the LLM gateway and model, ChromaDB, the RAG service — live in the database and are edited in the admin.
+of the agent — the LLM gateway and model, the RAG service — live in the database and are edited in the admin.
 """
 
 import os
+import sys
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -116,11 +117,13 @@ USE_TZ = True
 
 STATIC_URL = "/static/"
 STATIC_ROOT = Path(os.environ.get("DJANGO_STATIC_ROOT", BASE_DIR.parent.parent / "staticfiles"))
-# No manifest: the web interface imports its ES modules by relative paths, which a manifest would not rewrite.
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
-    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+    "staticfiles": {"BACKEND": "jedi_mind_agent.storage.StaticStorage"},
 }
+# Tests run with DEBUG off and without collectstatic, so there is no manifest to look hashed names up in.
+if sys.argv[1:2] == ["test"]:
+    STORAGES["staticfiles"] = {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"}
 
 # Uploaded books. The directory is a volume shared with the RAG worker, which reads the PDF from it.
 MEDIA_URL = "/media/"

@@ -2,7 +2,7 @@ import uuid
 
 from django.core.exceptions import ValidationError
 from django.core.validators import FileExtensionValidator, MaxValueValidator, MinValueValidator
-from django.db import models
+from django.db import connection, models
 from django.db.models import F
 from django.utils.text import slugify
 
@@ -10,7 +10,7 @@ MAX_BOOK_SIZE = 200 * 1024 * 1024
 
 
 class RagSettings(models.Model):
-    """Single row: where the RAG service and ChromaDB are and how many book chunks the agent gets."""
+    """Single row: where the RAG service is and how many book chunks the agent gets."""
 
     SINGLETON_ID = 1
 
@@ -20,22 +20,17 @@ class RagSettings(models.Model):
     request_timeout_seconds = models.PositiveSmallIntegerField(
         "таймаут запроса к RAG-сервису, с", default=30, validators=[MinValueValidator(1), MaxValueValidator(300)]
     )
-    chroma_host = models.CharField("хост ChromaDB", max_length=200, default="chroma")
-    chroma_port = models.PositiveIntegerField(
-        "порт ChromaDB", default=8000, validators=[MinValueValidator(1), MaxValueValidator(65535)]
-    )
-    chroma_collection = models.CharField("коллекция ChromaDB", max_length=200, default="jedi_mind_agent_chunks")
     top_k = models.PositiveSmallIntegerField(
         "фрагментов в контексте агента", default=5, validators=[MinValueValidator(1), MaxValueValidator(20)]
     )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = "настройки RAG и ChromaDB"
-        verbose_name_plural = "настройки RAG и ChromaDB"
+        verbose_name = "настройки RAG"
+        verbose_name_plural = "настройки RAG"
 
     def __str__(self) -> str:
-        return "Настройки RAG и ChromaDB"
+        return "Настройки RAG"
 
     def save(self, *args, **kwargs) -> None:
         self.pk = self.SINGLETON_ID
@@ -46,8 +41,6 @@ class RagSettings(models.Model):
         settings, _ = cls.objects.get_or_create(pk=cls.SINGLETON_ID)
         return settings
 
-    def chroma_config(self) -> dict:
-        return {"host": self.chroma_host, "port": self.chroma_port, "collection": self.chroma_collection}
 
 
 def validate_pdf(file) -> None:
@@ -66,16 +59,16 @@ class BookStatus(models.TextChoices):
     PROCESSING = "processing", "обрабатывается"
     READY = "ready", "загружена"
     FAILED = "failed", "ошибка"
-    DELETING = "deleting", "удаляется"
 
 
 class Book(models.Model):
     """A PDF book of the knowledge base.
 
-    Django only records the request; the RAG worker parses the PDF, computes embeddings and writes ChromaDB.
-    The worker works with the table directly, so its name and the columns it uses are a contract with
-    `rag_service/worker.py`: it claims rows in PENDING or DELETING status and finishes a job only if `revision`
-    is unchanged, so a book re-queued while it is being processed is processed again.
+    Django only records the request; the RAG worker parses the PDF, computes embeddings and writes the chunks
+    to `rag_chunks` (pgvector). The worker works with the tables directly, so their names and the columns it uses
+    are a contract with `rag_service/worker.py` and `rag_service/store.py`: it claims PENDING rows and finishes a
+    job only if `revision` is unchanged, so a book re-queued while it is being processed is processed again.
+    Chunks reference the book with ON DELETE CASCADE: deleting a book removes them.
     """
 
     title = models.CharField("название", max_length=300)
@@ -94,10 +87,6 @@ class Book(models.Model):
     status = models.CharField("статус", max_length=20, choices=BookStatus.choices, default=BookStatus.PENDING)
     error = models.TextField("ошибка", blank=True)
     revision = models.PositiveIntegerField("ревизия", default=0)
-    # ChromaDB settings at the time of queueing: where the worker writes this book.
-    ingest_config = models.JSONField("куда загружать", default=dict, blank=True)
-    # Where the book's chunks currently are; the worker clears them from here on re-indexing and deletion.
-    indexed_config = models.JSONField("где лежат фрагменты", null=True, blank=True)
     page_count = models.PositiveIntegerField("страниц", null=True, blank=True)
     chunk_count = models.PositiveIntegerField("фрагментов", null=True, blank=True)
     chunks_by_level = models.JSONField("фрагментов по уровням", null=True, blank=True)
@@ -124,26 +113,15 @@ class Book(models.Model):
         super().save(*args, **kwargs)
 
     def enqueue(self) -> None:
-        """Queue (re-)indexing with the current ChromaDB settings. Saves the whole row."""
+        """Queue (re-)indexing. Saves the whole row."""
         self.status = BookStatus.PENDING
         self.error = ""
         self.revision += 1
-        self.ingest_config = RagSettings.load().chroma_config()
         self.save()
 
     @classmethod
     def enqueue_many(cls, queryset: models.QuerySet) -> int:
-        return queryset.exclude(status=BookStatus.DELETING).update(
-            status=BookStatus.PENDING,
-            error="",
-            revision=F("revision") + 1,
-            ingest_config=RagSettings.load().chroma_config(),
-        )
-
-    @classmethod
-    def request_deletion(cls, queryset: models.QuerySet) -> int:
-        """The worker removes the chunks from ChromaDB, then the file and the row."""
-        return queryset.update(status=BookStatus.DELETING, revision=F("revision") + 1, started_at=None)
+        return queryset.update(status=BookStatus.PENDING, error="", revision=F("revision") + 1)
 
     def _unique_slug(self) -> str:
         stem = self.file.name.rsplit("/", 1)[-1].rsplit(".", 1)[0] if self.file else ""
@@ -152,3 +130,16 @@ class Book(models.Model):
         while Book.objects.filter(slug=slug).exclude(pk=self.pk).exists():
             slug, suffix = f"{base}-{suffix}", suffix + 1
         return slug
+
+
+def chunk_store_stats() -> dict:
+    """pgvector version and the number of stored chunks, read by Django from the shared database."""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM rag_chunks")
+        count = cursor.fetchone()[0]
+        version = None
+        if connection.vendor == "postgresql":
+            cursor.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+            row = cursor.fetchone()
+            version = row[0] if row else None
+    return {"pgvector": version, "count": count}

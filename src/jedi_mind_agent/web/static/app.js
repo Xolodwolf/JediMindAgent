@@ -47,7 +47,7 @@ function render() {
     pending: store.pending,
     thinking: store.busy,
     loadError: store.loadError,
-    onRetry: load,
+    onRetry: () => load(),
     onAnswer: (choice) => sendMessage(String(choice)),
     openSources: store.openSources,
   });
@@ -72,15 +72,14 @@ function render() {
   els.resetButton.disabled = store.busy;
 }
 
-async function load() {
+// `initial` is the data embedded in the page by the server; without it (a retry) everything is fetched from the API.
+async function load(initial) {
   store.loadError = null;
   render();
   try {
-    const [stateResponse, messages, exercises] = await Promise.all([
-      api.getState(),
-      api.getMessages(),
-      api.getExercises(),
-    ]);
+    const [stateResponse, messages, exercises] = initial
+      ? [initial.state, initial.messages, initial.exercises]
+      : await Promise.all([api.getState(), api.getMessages(), api.getExercises()]);
     store.state = stateResponse.state;
     store.messages = messages;
     store.exercises = exercises;
@@ -280,4 +279,13 @@ els.resetDialog.addEventListener("close", () => {
   if (els.resetDialog.returnValue === "confirm") resetMemory();
 });
 
-load();
+function readInitialData() {
+  const element = document.getElementById("initial-data");
+  try {
+    return element ? JSON.parse(element.textContent) : null;
+  } catch {
+    return null;
+  }
+}
+
+load(readInitialData());

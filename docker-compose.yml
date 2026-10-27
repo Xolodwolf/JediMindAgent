@@ -1,4 +1,6 @@
-x-database-url: &database-url postgresql://postgres:postgres@db:5432/jedi_mind_agent
+# By default PostgreSQL (with pgvector) runs here: COMPOSE_PROFILES=local-db in .env.
+# For an external database remove that line and set DATABASE_URL in .env; the db container is then not started.
+x-database-url: &database-url ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/jedi_mind_agent}
 
 services:
   web:
@@ -14,6 +16,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+        required: false
       rag:
         condition: service_started
 
@@ -21,27 +24,20 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.rag
+    env_file:
+      - .env
     environment:
       DATABASE_URL: *database-url
     volumes:
       - media:/app/media
-      - model_cache:/home/app/.cache
     depends_on:
       db:
         condition: service_healthy
-      chroma:
-        condition: service_started
-
-  chroma:
-    image: chromadb/chroma:1.0.15
-    environment:
-      IS_PERSISTENT: "TRUE"
-      PERSIST_DIRECTORY: /chroma/chroma
-    volumes:
-      - chroma_data:/chroma/chroma
+        required: false
 
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
+    profiles: ["local-db"]
     environment:
       POSTGRES_DB: jedi_mind_agent
       POSTGRES_USER: postgres
@@ -57,7 +53,5 @@ services:
       retries: 10
 
 volumes:
-  chroma_data:
   media:
-  model_cache:
   postgres_data:
